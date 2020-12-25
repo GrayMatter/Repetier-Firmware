@@ -1,6 +1,6 @@
 {
   "build": {
-    "core": "sam",
+    "core": "arduino",
     "cpu": "cortex-m3",
     "extra_flags": "-D__SAM3X8E__ -DARDUINO_ARCH_SAM -DARDUINO_SAM_DUE",
     "f_cpu": "84000000L",
@@ -18,10 +18,15 @@
         "0x003D"
       ]
     ],
-    "ldscript": "flash.ld",
+    "arduino": {
+      "ldscript": "flash.ld"
+    },
     "mcu": "at91sam3x8e",
     "usb_product": "due",
-    "variant": "stacker_3d_superboard_dbg"
+    "variant": "stacker_3d_superboard",
+    "zephyr": {
+      "variant": "arduino_due"
+    }
   },
   "connectivity": [
     "can"
@@ -29,11 +34,13 @@
   "debug": {
     "jlink_device": "ATSAM3X8E",
     "openocd_chipname": "at91sam3X8E",
+    "openocd_target": "at91sam3XXX",
     "svd_path": "ATSAM3X8E.svd"
   },
   "frameworks": [
     "arduino",
-    "simba"
+    "simba",
+    "zephyr"
   ],
   "name": "STACKER 3d Superboard (Programming Port)",
   "upload": {
@@ -53,6 +60,6 @@
     "use_1200bps_touch": true,
     "wait_for_upload_port": false
   },
-  "url": "http://stacker3d.com",
+  "url": "https://stacker3d.com",
   "vendor": "STACKER 3D"
 }

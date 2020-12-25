@@ -18,7 +18,7 @@
 
 // RADDS Board
 // http://www.dr-henschke.de/RADDS_due.html
-#if MOTHERBOARD == 402
+#if MOTHERBOARD == MOTHERBOARD_RADDS
 #ifndef __SAM3X8E__
 #error Oops!  Make sure you have 'Arduino Due' selected from the 'Tools -> Boards' menu.
 #endif
@@ -112,7 +112,9 @@
 // To set microstepping on startup set START_GCODE to e.g.
 // "M42 P67 S255\nM42 P68 S255\nM42 P69 S255"
 
+#ifndef SDSUPPORT
 #define SDSUPPORT 1
+#endif
 #define SDPOWER -1
 // 4,10,52 if using HW SPI.
 #define SDSS 4
@@ -129,6 +131,12 @@
 #define SDA_PIN 20
 // 21 or 71
 #define SCL_PIN 21
+
+#define SERVO1 5
+#define SERVO2 6
+#define SERVO3 39
+
+#define BEEPER_PIN -1
 
 // Controller related default pins
 
@@ -161,8 +169,9 @@
 
 #else
 
-// This is for offcial display port usage
+// This is for official display port usage
 
+#undef BEEPER_PIN
 #define BEEPER_PIN 41
 #define UI_DISPLAY_RS_PIN 42
 #define UI_DISPLAY_RW_PIN -1
@@ -198,8 +207,12 @@
 #define EEPROM_SERIAL_ADDR 0x50  // 7 bit i2c address (without R/W bit)
 #define EEPROM_PAGE_SIZE 64      // page write buffer size
 #define EEPROM_PAGE_WRITE_TIME 7 // page write time in milliseconds (docs say 5ms but that is too short)
-// specify size of eeprom address register
-// TWI_MMR_IADRSZ_1_BYTE for 1 byte, or TWI_MMR_IADRSZ_2_BYTE for 2 byte
-#define EEPROM_ADDRSZ_BYTES TWI_MMR_IADRSZ_2_BYTE
+#ifndef EEPROM_AVAILABLE         // User can override eeprom usage
 #define EEPROM_AVAILABLE EEPROM_I2C
+#endif
+
+#ifndef MAX_WIRE_INTERFACES
+#define MAX_WIRE_INTERFACES 1
+#endif
+
 #endif

@@ -26,12 +26,12 @@ from 0, where 0 position depends on printer type.
 class Motion3Buffer;
 class VelocityProfile;
 
-enum Motion2State {
+enum class Motion2State {
     NOT_INITIALIZED = 0,
     ACCELERATE_INIT = 1,
     ACCELERATING = 2,
     PLATEAU_INIT = 3,
-    PLATEU = 4,
+    PLATEAU = 4,
     DECCELERATE_INIT = 5,
     DECELERATING = 6,
     FINISHED = 7
@@ -43,7 +43,7 @@ public:
     Motion2State state;
     Motion1Buffer* motion1;
     float t1, t2, t3;
-    float s1, s2, s3, soff;
+    float s1, s2, s3; // , soff;
     // float sScale1,sScale2,sScale3;
     // float sOffset2, sOffset3;
     int32_t stepsRemaining[NUM_AXES]; // Steps remaining when testing endstops
@@ -62,7 +62,9 @@ public:
     static volatile fast8_t length;
     static int32_t lastMotorPos[2][NUM_AXES];
     static fast8_t lastMotorIdx; // index to last pos
-    static int advanceSteps;     // already included advance steps
+    static volatile int16_t openBabysteps[NUM_AXES];
+    static const int16_t babystepsPerSegment[NUM_AXES];
+    static int advanceSteps; // already included advance steps
     static void init();
     // Timer gets called at PREPARE_FREQUENCY so it has enough time to
     // prefill data structures required by stepper interrupt. Each segment planned

@@ -16,7 +16,7 @@
 
 */
 
-#if PRINTER_TYPE == PRINTER_TYPE_CARESIAN
+#if PRINTER_TYPE == PRINTER_TYPE_CARTESIAN
 
 class PrinterType {
     static float bedRectangle[2][2];
@@ -32,7 +32,7 @@ public:
 
     static void homeAxis(fast8_t axis);
 
-    static bool positionAllowed(float pos[NUM_AXES]);
+    static bool positionAllowed(float pos[NUM_AXES], float zOfficial);
     static void closestAllowedPositionWithNewXYOffset(float pos[NUM_AXES], float offX, float offY, float safety);
     static bool positionOnBed(float pos[2]);
     static void getBedRectangle(float& xmin, float& xmax, float& ymin, float& ymax);
@@ -43,6 +43,7 @@ public:
     static float feedrateForMoveSteps(fast8_t axes);
     static void deactivatedTool(fast8_t id);
     static void activatedTool(fast8_t id);
+    static void toolchangeFinished() { }
     static void eepromHandle();
     static void restoreFromConfiguration();
     static void init();
@@ -56,7 +57,13 @@ public:
     static inline bool ignoreAxisForLength(fast8_t axis) { return false; }
     static void transformedToOfficial(float trans[NUM_AXES], float official[NUM_AXES]);
     static void officialToTransformed(float official[NUM_AXES], float trans[NUM_AXES]);
-    static void park(GCode* com) {}
+    static void park(GCode* com) { Motion1::moveToParkPosition(); }
     static bool canSelectTool(fast8_t toolId);
+    static void M290(GCode* com);
+    static void M360();
+    static bool runMCode(GCode* com);
+    static bool runGCode(GCode* com);
+    static PGM_P getGeometryName();
 };
+#define MACHINE_TYPE "Cartesian"
 #endif

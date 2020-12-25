@@ -18,7 +18,9 @@
 
 // Ultratronics Board  (experimental, use with care probably even not working!)
 // http://www.reprapworld.com
-#if MOTHERBOARD == 409
+// https://reprapworld.com/documentation/datasheet_ultratronics10_05.pdf
+
+#if MOTHERBOARD == MOTHERBOARD_ULTRATRONICS
 #ifndef __SAM3X8E__
 #error Oops!  Make sure you have 'Arduino Due' selected from the 'Tools -> Boards' menu.
 #endif
@@ -58,7 +60,7 @@
 // Due analog pin A2 = channel 5
 #define TEMP_2_PIN 5
 
-#define HEATER_3_PIN 6
+#define HEATER_3_PIN 7
 // Due analog pin A3 = channel 4
 #define TEMP_3_PIN 4
 
@@ -88,7 +90,7 @@
 #define ORIG_E3_DIR_PIN 38
 #define ORIG_E3_ENABLE_PIN 40
 
-#define SDSUPPORT -1
+#define SDSUPPORT 1
 #define SDPOWER -1
 // 4,10,52 if using HW SPI.
 #define SDSS 59
@@ -107,6 +109,8 @@
 #define SUICIDE_PIN -1 //PIN that has to be turned on right after start, to keep power flowing.
 #define ENC424_SS 61
 
+#define BEEPER_PIN 27
+
 // 20 or 70
 #define SDA_PIN 70
 //21 or 71
@@ -124,14 +128,18 @@
 #define EEPROM_SERIAL_ADDR 0x50  // 7 bit i2c address (without R/W bit)
 #define EEPROM_PAGE_SIZE 64      // page write buffer size
 #define EEPROM_PAGE_WRITE_TIME 7 // page write time in milliseconds (docs say 5ms but that is too short)
-// specify size of eeprom address register
-// TWI_MMR_IADRSZ_1_BYTE for 1 byte, or TWI_MMR_IADRSZ_2_BYTE for 2 byte
-#define EEPROM_ADDRSZ_BYTES TWI_MMR_IADRSZ_2_BYTE
 // Ultronics has no eeprom for storing changeable data
 // as a solution you can use sd card. But this requires always
 // the same sd card when powering up the printer
 //#define EEPROM_AVAILABLE EEPROM_NONE
 #define EEPROM_AVAILABLE EEPROM_SDCARD
+
+#ifndef WIRE_PORT
+#define WIRE_PORT Wire1
+#endif
+#ifndef MAX_WIRE_INTERFACES
+#define MAX_WIRE_INTERFACES 2
+#endif
 
 #define MB_SETUP \
     SET_OUTPUT(ORIG_FAN_PIN); \
@@ -159,4 +167,31 @@
     SET_OUTPUT(SDSS); \
     WRITE(SDSS, HIGH)
 
+#endif
+
+#ifndef CUSTOM_CONTROLLER_PINS
+#if FEATURE_CONTROLLER == CONTROLLER_REPRAPWORLD_GLCD
+#undef BEEPER_PIN
+#define BEEPER_PIN 27
+#define UI_DISPLAY_RS_PIN 62
+#define UI_DISPLAY_ENABLE_PIN 75
+#define UI_DISPLAY_D4_PIN 76
+#define UI_DISPLAY_D5_PIN -1
+#define UI_DISPLAY_D6_PIN -1
+#define UI_DISPLAY_D7_PIN -1
+#define UI_ENCODER_A 20
+#define UI_ENCODER_B 21
+#define UI_ENCODER_CLICK 64
+#define UI_RESET_PIN -1
+#define UI_BACK_PIN -1
+#undef ORIG_SDCARDDETECT
+#define ORIG_SDCARDDETECT 60
+#undef SDCARDDETECTINVERTED
+#define SDCARDDETECTINVERTED 0
+
+#elif FEATURE_CONTROLLER > 1
+
+#error There is no pin definition for the selected display. Please add it to boards/due/ultratronics.h to use it!
+
+#endif
 #endif

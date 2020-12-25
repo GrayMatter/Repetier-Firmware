@@ -58,6 +58,34 @@ IO_INPUT_INVERTED(IOEndstopXMax, ORIG_X_MAX_PIN)
 IO_INPUT_INVERTED(IOEndstopYMax, ORIG_Y_MAX_PIN)
 IO_INPUT_INVERTED(IOEndstopZMax, ORIG_Z_MAX_PIN)
 
+// Controller input pins
+
+#if defined(UI_ENCODER_CLICK) && UI_ENCODER_CLICK >= 0
+IO_INPUT_INVERTED_PULLUP(ControllerClick, UI_ENCODER_CLICK)
+#else
+IO_INPUT_DUMMY(ControllerClick, false)
+#endif
+#if defined(UI_ENCODER_A) && UI_ENCODER_A >= 0
+IO_INPUT_INVERTED_PULLUP(ControllerEncA, UI_ENCODER_A)
+#else
+IO_INPUT_DUMMY(ControllerEncA, false)
+#endif
+#if defined(UI_ENCODER_B) && UI_ENCODER_B >= 0
+IO_INPUT_INVERTED_PULLUP(ControllerEncB, UI_ENCODER_B)
+#else
+IO_INPUT_DUMMY(ControllerEncB, false)
+#endif
+#if defined(UI_BACK_PIN) && UI_BACK_PIN >= 0
+IO_INPUT_PULLUP(ControllerBack, UI_BACK_PIN)
+#else
+IO_INPUT_DUMMY(ControllerBack, false)
+#endif
+#if defined(UI_RESET_PIN) && UI_RESET_PIN >= 0
+IO_INPUT_PULLUP(ControllerReset, UI_RESET_PIN)
+#else
+IO_INPUT_DUMMY(ControllerReset, false)
+#endif
+
 // Define our endstops solutions
 // You need to define all min and max endstops for all
 // axes except E even if you have none!
@@ -134,9 +162,9 @@ STEPPER_SIMPLE(E2Motor, IOE2Step, IOE2Dir, IOE2Enable, endstopNone, endstopNone)
 // control temperature. Higher level classes take these as input
 // and simple heater like a heated bed use it directly.
 
-HEAT_MANAGER_PID('B', HeatedBed1, TempBed1, PWMBed1, 70, 255, 20, 60000, 196, 33, 290, 80, 255)
-HEAT_MANAGER_PID('E', HeaterExtruder1, TempExt1, PWMExtruder1, 260, 255, 20, 20000, 4, 2, 40, 40, 255)
-HEAT_MANAGER_PID('E', HeaterExtruder2, TempExt2, PWMExtruder2, 260, 255, 20, 20000, 4, 2, 40, 40, 255)
+HEAT_MANAGER_PID(HeatedBed1, 'B', 0, TempBed1, PWMBed1, 70, 255, 1000, 20, 60000, 196, 33, 290, 80, 255, false)
+HEAT_MANAGER_PID(HeaterExtruder1, 'E', 0, TempExt1, PWMExtruder1, 260, 255, 1000, 20, 20000, 4, 2, 40, 40, 255, false)
+HEAT_MANAGER_PID(HeaterExtruder2, 'E', 1, TempExt2, PWMExtruder2, 260, 255, 1000, 20, 20000, 4, 2, 40, 40, 255, false)
 
 // Coolers are stand alone functions that allow it to control
 // a fan with external sensors. Many extruders require a cooling
@@ -151,3 +179,8 @@ HEAT_MANAGER_PID('E', HeaterExtruder2, TempExt2, PWMExtruder2, 260, 255, 20, 200
 
 TOOL_EXTRUDER(ToolExtruder1, 0, -13, 0, HeaterExtruder1, E1Motor, 1.75, 147.0, 5, 30, 5000, 40, "M117 Extruder 1", "", &Fan1PWM)
 TOOL_EXTRUDER(ToolExtruder2, 0, 13, 0, HeaterExtruder2, E2Motor, 1.75, 147.0, 5, 30, 5000, 40, "M117 Extruder 2\nM400\nM340 P0 S1950 R600\nG4 P300", "M340 P0 S1050 R600\nG4 P300", &Fan1PWM)
+// Define beeper output
+#if BEEPER_PIN > -1
+IO_OUTPUT(IOBeeperMain, BEEPER_PIN)
+BEEPER_SOURCE_IO(MainBeeper, IOBeeperMain)
+#endif

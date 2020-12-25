@@ -49,15 +49,16 @@ Level 5: Nonlinear motor step position, only for nonlinear drive systems
 #undef AUTOMATIC_POWERUP
 #define AUTOMATIC_POWERUP 0
 #define ENSURE_POWER \
-    {}
+    { }
 #endif
 
-union floatLong {
-    float f;
-    uint32_t l;
-#ifdef SUPPORT_64_BIT_MATH
-    uint64_t L;
-#endif
+enum class DefaultSounds {
+    NEXT_PREV,
+    OK,
+    ERROR,
+    SUCCESS,
+    RESET,
+    WARNING
 };
 
 union wizardVar {
@@ -70,21 +71,21 @@ union wizardVar {
     uint8_t uc;
 
     wizardVar()
-        : i(0) {}
+        : i(0) { }
     wizardVar(float _f)
-        : f(_f) {}
+        : f(_f) { }
     wizardVar(int32_t _f)
-        : l(_f) {}
+        : l(_f) { }
     wizardVar(uint32_t _f)
-        : ul(_f) {}
+        : ul(_f) { }
     wizardVar(int16_t _f)
-        : i(_f) {}
+        : i(_f) { }
     wizardVar(uint16_t _f)
-        : ui(_f) {}
+        : ui(_f) { }
     wizardVar(int8_t _f)
-        : c(_f) {}
+        : c(_f) { }
     wizardVar(uint8_t _f)
-        : uc(_f) {}
+        : uc(_f) { }
 };
 
 #define FIRMWARE_EVENT_JAM_DEBUG 1
@@ -103,7 +104,7 @@ public:
 };
 
 #define PRINTER_FLAG0_STEPPER_DISABLED 1
-#define PRINTER_FLAG0_SEPERATE_EXTRUDER_INT 2
+// #define PRINTER_FLAG0_SEPERATE_EXTRUDER_INT 2
 #define PRINTER_FLAG0_TEMPSENSOR_DEFECT 4
 #define PRINTER_FLAG0_FORCE_CHECKSUM 8
 #define PRINTER_FLAG0_MANUAL_MOVE_MODE 16
@@ -125,11 +126,14 @@ public:
 #define PRINTER_FLAG2_JAMCONTROL_DISABLED 32
 #define PRINTER_FLAG2_HOMING 64
 #define PRINTER_FLAG2_ALL_E_MOTORS 128 // Set all e motors flag
+#define PRINTER_FLAG3_AUTOREPORT_SD 4  // auto reports current file byte pos
 #define PRINTER_FLAG3_PRINTING 8       // set explicitly with M530
 #define PRINTER_FLAG3_AUTOREPORT_TEMP 16
 #define PRINTER_FLAG3_SUPPORTS_STARTSTOP 32
 #define PRINTER_FLAG3_DOOR_OPEN 64
+#define PRINTER_FLAG3_NATIVE_USB 128
 
+#define PRINTER_REPORT_FLAG_ENDSTOPS 1 // report end stop state as soon as possible
 // List of possible interrupt events (1-255 allowed)
 #define PRINTER_INTERRUPT_EVENT_JAM_DETECTED 1
 #define PRINTER_INTERRUPT_EVENT_JAM_SIGNAL0 2
@@ -142,12 +146,13 @@ public:
 #define HOME_DISTANCE_STEPS (Printer::zMaxSteps - Printer::zMinSteps + 1000)
 #define HOME_DISTANCE_MM (HOME_DISTANCE_STEPS * invAxisStepsPerMM[Z_AXIS])
 // Some defines to make clearer reading, as we overload these Cartesian memory locations for delta
-#define towerAMaxSteps Printer::xMaxSteps
-#define towerBMaxSteps Printer::yMaxSteps
-#define towerCMaxSteps Printer::zMaxSteps
-#define towerAMinSteps Printer::xMinSteps
-#define towerBMinSteps Printer::yMinSteps
-#define towerCMinSteps Printer::zMinSteps
+
+#define EPR_RESCUE_MODE 0
+#define EPR_RESCUE_TOOL 1
+#define EPR_RESCUE_LAST_RECEIVED 2
+#define EPR_RESCUE_LAST_POS EPR_RESCUE_LAST_RECEIVED + 4 * NUM_AXES
+#define EPR_RESCUE_OFFSETS EPR_RESCUE_LAST_POS + 4 * NUM_AXES
+#define EPR_RESCUE_SIZE EPR_RESCUE_OFFSETS + 4 * NUM_AXES
 
 class Plane {
 public:
@@ -157,18 +162,6 @@ public:
         return a * x + y * b + c;
     }
 };
-
-#ifndef DEFAULT_PRINTER_MODE
-#if NUM_TOOLS > 0
-#define DEFAULT_PRINTER_MODE PRINTER_MODE_FFF
-#elif defined(SUPPORT_LASER) && SUPPORT_LASER
-#define DEFAULT_PRINTER_MODE PRINTER_MODE_LASER
-#elif defined(SUPPORT_CNC) && SUPPORT_CNC
-#define DEFAULT_PRINTER_MODE PRINTER_MODE_CNC
-#else
-#error No supported printer mode compiled
-#endif
-#endif
 
 extern bool runBedLeveling(int save); // save = S parameter in gcode
 
@@ -221,12 +214,10 @@ An additional transformation converts the CMC coordinates into NMC.
 Given:
 - Target position for tool: x_rwc, y_rwc, z_rwc
 - Tool offsets: offsetX, offsetY, offsetZ
-- Offset from bed leveling: Motion1::zprobeZOffset
 
 Step 1: Convert to ROTC
 
     transformToPrinter(x_rwc + Motion1::toolOffset[X_AXIS], y_rwc + Motion1::toolOffset[Y_AXIS], z_rwc +  Motion1::toolOffset[Z_AXIS], x_rotc, y_rotc, z_rotc);
-    z_rotc += Motion1::zprobeZOffset
 
 Step 2: Compute CMC
 
@@ -244,9 +235,9 @@ Step 1: Convert to ROTC
     x_rotc = static_cast<float>(x_cmc) * invAxisStepsPerMM[X_AXIS];
     y_rotc = static_cast<float>(y_cmc) * invAxisStepsPerMM[Y_AXIS];
     #if NONLINEAR_SYSTEM
-    z_rotc = static_cast<float>(z_cmc * invAxisStepsPerMM[Z_AXIS] - Motion1::zprobeZOffset;
+    z_rotc = static_cast<float>(z_cmc * invAxisStepsPerMM[Z_AXIS];
     #else
-    z_rotc = static_cast<float>(z_cmc - zCorrectionStepsIncluded) * invAxisStepsPerMM[Z_AXIS] - Motion1::zprobeZOffset;
+    z_rotc = static_cast<float>(z_cmc - zCorrectionStepsIncluded) * invAxisStepsPerMM[Z_AXIS];
     #endif
 
 Step 2: Convert to RWC
@@ -266,41 +257,34 @@ public:
     static uint8_t relativeCoordinateMode;         ///< Determines absolute (false) or relative Coordinates (true).
     static uint8_t relativeExtruderCoordinateMode; ///< Determines Absolute or Relative E Codes while in Absolute Coordinates mode. E is always relative in Relative Coordinates mode.
 
-    static uint8_t unitIsInches;
-    static uint8_t flag0, flag1; // 1 = stepper disabled, 2 = use external extruder interrupt, 4 = temp Sensor defect, 8 = homed
-    static uint8_t flag2, flag3;
-    static uint32_t interval;   ///< Last step duration in ticks.
-    static uint32_t timer;      ///< used for acceleration/deceleration timing
-    static uint32_t stepNumber; ///< Step number in current move.
-    static millis_t lastTempReport;
-    static int32_t printingTime;       ///< Printing time in seconds
-    static float extrudeMultiplyError; ///< Accumulated error during extrusion
-    static float extrusionFactor;      ///< Extrusion multiply factor
-#if DRIVE_SYSTEM != DELTA || defined(DOXYGEN)
-    static int32_t zCorrectionStepsIncluded;
-#endif
-#if FEATURE_Z_PROBE || MAX_HARDWARE_ENDSTOP_Z || NONLINEAR_SYSTEM || defined(DOXYGEN)
-    static int32_t stepsRemainingAtZHit;
-#endif
-#if FEATURE_AUTOLEVEL || defined(DOXYGEN)
-    static float autolevelTransformation[9]; ///< Transformation matrix
-#endif
-#if FAN_THERMO_PIN > -1 || defined(DOXYGEN)
-    static float thermoMinTemp;
-    static float thermoMaxTemp;
-#endif
-#if FEATURE_BABYSTEPPING || defined(DOXYGEN)
-    static int16_t zBabystepsMissing;
-    static int16_t zBabysteps;
-#endif
-    static float feedrate;               ///< Last requested feedrate.
-    static int feedrateMultiply;         ///< Multiplier for feedrate in percent (factor 1 = 100)
-    static unsigned int extrudeMultiply; ///< Flow multiplier in percent (factor 1 = 100)
-    static uint8_t interruptEvent;       ///< Event generated in interrupts that should/could be handled in main thread
-    static speed_t vMaxReached;          ///< Maximum reached speed
-    static uint32_t msecondsPrinting;    ///< Milliseconds of printing time (means time with heated extruder)
-    static float filamentPrinted;        ///< mm of filament printed since counting started
-    static float filamentPrintedTotal;   ///< Total amount of filament printed in meter
+    static bool failedMode;                         // In failed mode only M110 and M999 is working
+    static PromptDialogCallback activePromptDialog; ///< Dialog ID that is active
+    static bool promptSupported;                    ///< At least one connecte dhost supports host prompts
+    static uint8_t unitIsInches;                    ///< true if we compute in inces and not mm
+    static uint8_t rescueOn;                        // 1 is rescue is enabled
+    static uint8_t flag0, flag1;                    // 1 = stepper disabled, 2 = use external extruder interrupt, 4 = temp Sensor defect, 8 = homed
+    static uint8_t flag2, flag3;                    // Some more flags
+    static uint8_t reportFlag;                      ///< Report several staus infos on next loop
+    static uint32_t interval;                       ///< Last step duration in ticks.
+    static uint32_t timer;                          ///< used for acceleration/deceleration timing
+    static uint32_t stepNumber;                     ///< Step number in current move.
+    static millis_t lastTempReport;                 ///< Time of last temperature report for autoreporting temperatures
+    static millis_t autoTempReportPeriodMS;         ///< Configurable delay between autoreports in ms. Default 1000ms.
+    static millis_t lastSDReport;                   ///< Time of last SD read position report for autoreporting SD position
+    static millis_t autoSDReportPeriodMS;           ///< Configurable delay between SD autoreports in ms. Default off.
+    static int32_t printingTime;                    ///< Printing time in seconds
+    static float extrudeMultiplyError;              ///< Accumulated error during extrusion
+    static float extrusionFactor;                   ///< Extrusion multiply factor
+    static uint16_t rescuePos;                      // EEPROM address for rescue
+    static fast8_t safetyParked;                    /// True if moved to a safety position to protect print
+    static float feedrate;                          ///< Last requested feedrate.
+    static int feedrateMultiply;                    ///< Multiplier for feedrate in percent (factor 1 = 100)
+    static unsigned int extrudeMultiply;            ///< Flow multiplier in percent (factor 1 = 100)
+    static uint8_t interruptEvent;                  ///< Event generated in interrupts that should/could be handled in main thread
+    static speed_t vMaxReached;                     ///< Maximum reached speed
+    static uint32_t msecondsPrinting;               ///< Milliseconds of printing time (means time with heated extruder)
+    static float filamentPrinted;                   ///< mm of filament printed since counting started
+    static float filamentPrintedTotal;              ///< Total amount of filament printed in meter
 #if ENABLE_BACKLASH_COMPENSATION || defined(DOXYGEN)
     static float backlashX;
     static float backlashY;
@@ -309,14 +293,18 @@ public:
 #endif
     // Print status related
     static int currentLayer;
-    static int maxLayer;       // -1 = unknown
-    static char printName[21]; // max. 20 chars + 0
-    static float progress;
+    static int maxLayer;             // -1 = unknown
+    static char printName[21];       // max. 20 chars + 0
     static fast8_t breakLongCommand; // Set by M108 to stop long tasks
     static fast8_t wizardStackPos;
+    static fast8_t caseLightMode;
+    static fast8_t caseLightBrightness;
+    static float progress;
     static wizardVar wizardStack[WIZARD_STACK_SIZE];
 
     static void handleInterruptEvent();
+
+    static ufast8_t toneVolume;
 
     static INLINE void setInterruptEvent(uint8_t evt, bool highPriority) {
         if (highPriority || interruptEvent == 0)
@@ -382,21 +370,31 @@ public:
     static INLINE void debugReset(uint8_t flags) {
         setDebugLevel(debugLevel & ~flags);
     }
+
+    static INLINE bool isReportFlag(uint8_t flags) {
+        return (reportFlag & flags);
+    }
+
+    static INLINE void reportFlagSet(uint8_t flags) {
+        reportFlag |= flags;
+    }
+
+    static INLINE void reportFlagReset(uint8_t flags) {
+        reportFlag = (reportFlag & ~flags);
+    }
 #if AUTOMATIC_POWERUP
     static void enablePowerIfNeeded();
 #endif
-    /** Sets the pwm for the fan speed. Gets called by motion control or Commands::setFanSpeed. */
-    static void setFanSpeedDirectly(uint8_t speed, int fanId);
 
     /** For large machines, the nonlinear transformation can exceed integer 32bit range, so floating point math is needed. */
 
-    static INLINE uint8_t isAdvanceActivated() {
+    /* static INLINE uint8_t isAdvanceActivated() {
         return flag0 & PRINTER_FLAG0_SEPERATE_EXTRUDER_INT;
     }
 
     static INLINE void setAdvanceActivated(uint8_t b) {
         flag0 = (b ? flag0 | PRINTER_FLAG0_SEPERATE_EXTRUDER_INT : flag0 & ~PRINTER_FLAG0_SEPERATE_EXTRUDER_INT);
-    }
+    } */
 
     static INLINE uint8_t isHomedAll() {
         return flag1 & PRINTER_FLAG1_HOMED_ALL;
@@ -416,6 +414,14 @@ public:
 
     static INLINE void setAutoreportTemp(uint8_t b) {
         flag3 = (b ? flag3 | PRINTER_FLAG3_AUTOREPORT_TEMP : flag3 & ~PRINTER_FLAG3_AUTOREPORT_TEMP);
+    }
+
+    static INLINE uint8_t isAutoreportSD() {
+        return flag3 & PRINTER_FLAG3_AUTOREPORT_SD;
+    }
+
+    static INLINE void setAutoreportSD(uint8_t b) {
+        flag3 = (b ? flag3 | PRINTER_FLAG3_AUTOREPORT_SD : flag3 & ~PRINTER_FLAG3_AUTOREPORT_SD);
     }
 
     static INLINE uint8_t isAllKilled() {
@@ -491,9 +497,11 @@ public:
         return flag2 & PRINTER_FLAG2_AUTORETRACT;
     }
 
-    static INLINE void setAutoretract(uint8_t b) {
-        flag2 = (b ? flag2 | PRINTER_FLAG2_AUTORETRACT : flag2 & ~PRINTER_FLAG2_AUTORETRACT);
-        Com::printFLN(PSTR("Autoretract:"), b);
+    static INLINE void setAutoretract(uint8_t b, bool silent = false) {
+        flag2 = (b ? flag2 | PRINTER_FLAG2_AUTORETRACT : flag2 & ~PRINTER_FLAG2_AUTORETRACT); 
+        if (!silent) {
+            Com::printFLN(PSTR("Autoretract:"), b);
+        }
     }
 
     static INLINE uint8_t isPrinting() {
@@ -535,8 +543,8 @@ public:
         return (flag2 & PRINTER_FLAG2_DEBUG_JAM) != 0;
     }
 
-    static INLINE uint8_t isDebugJamOrDisabled() {
-        return (flag2 & (PRINTER_FLAG2_DEBUG_JAM | PRINTER_FLAG2_JAMCONTROL_DISABLED)) != 0;
+    static INLINE uint8_t isTestJamRequired() {
+        return isDebugJam() || !isJamcontrolDisabled();
     }
 
     static INLINE void setDebugJam(uint8_t b) {
@@ -557,7 +565,12 @@ public:
         flag2 = (b ? flag2 | PRINTER_FLAG2_JAMCONTROL_DISABLED : flag2 & ~PRINTER_FLAG2_JAMCONTROL_DISABLED);
         Com::printFLN(PSTR("Jam control disabled:"), b);
     }
-
+    static INLINE void setNativeUSB(bool yes) {
+        flag3 = (yes ? flag3 | PRINTER_FLAG3_NATIVE_USB : flag3 & ~PRINTER_FLAG3_NATIVE_USB);
+    }
+    static INLINE bool isNativeUSB() {
+        return flag3 & PRINTER_FLAG3_NATIVE_USB;
+    }
     static INLINE void toggleAnimation() {
         setAnimation(!isAnimation());
     }
@@ -567,7 +580,7 @@ public:
     static INLINE bool areAllSteppersDisabled() {
         return flag0 & PRINTER_FLAG0_STEPPER_DISABLED;
     }
-    static INLINE void setAllSteppersDiabled() {
+    static INLINE void setAllSteppersDisabled() {
         flag0 |= PRINTER_FLAG0_STEPPER_DISABLED;
     }
     static INLINE void unsetAllSteppersDisabled() {
@@ -599,11 +612,6 @@ public:
     /** \brief copies currentPosition to parameter. */
     static void realPosition(float& xp, float& yp, float& zp);
 
-    static INLINE void insertStepperHighDelay() {
-#if STEPPER_HIGH_DELAY > 0
-        HAL::delayMicroseconds(STEPPER_HIGH_DELAY);
-#endif
-    }
     static void updateDerivedParameter();
     /** If we are not homing or destination check being disabled, this will reduce _destinationSteps_ to a
     valid value. In other words this works as software endstop. */
@@ -647,22 +655,15 @@ public:
     static void defaultLoopActions();
     static void setOrigin(float xOff, float yOff, float zOff);
     static int getFanSpeed(int fanId);
-    static void setFanSpeed(int speed, bool immediately, int fanId);
+    static void setFanSpeed(int speed, bool immediately, int fanId, uint32_t timeoutMS = 0);
+    static void checkFanTimeouts();
 
 #if MAX_HARDWARE_ENDSTOP_Z || defined(DOXYGEN)
     static float runZMaxProbe();
 #endif
-#if FEATURE_Z_PROBE || defined(DOXYGEN)
-    static bool startProbing(bool runScript, bool enforceStartHeight = true);
-    static void finishProbing();
-    static float runZProbe(bool first, bool last, uint8_t repeat = Z_PROBE_REPETITIONS, bool runStartScript = true, bool enforceStartHeight = true);
-    static void measureZProbeHeight(float curHeight);
-    static void waitForZProbeStart();
-    static float bendingCorrectionAt(float x, float y);
-#endif
     static void zBabystep();
 
-    static INLINE void resetWizardStack() {
+    /* static INLINE void resetWizardStack() {
         wizardStackPos = 0;
     }
     static INLINE void pushWizardVar(wizardVar v) {
@@ -670,30 +671,32 @@ public:
     }
     static INLINE wizardVar popWizardVar() {
         return wizardStack[--wizardStackPos];
-    }
+    } */
     static void showConfiguration();
-    static void setCaseLight(bool on);
     static void reportCaseLightStatus();
 #if JSON_OUTPUT || defined(DOXYGEN)
     static void showJSONStatus(int type);
 #endif
-    static void homeXAxis();
-    static void homeYAxis();
-    static void homeZAxis();
     static void pausePrint();
     static void continuePrint();
     static void stopPrint();
-#if FEATURE_Z_PROBE || defined(DOXYGEN)
-    /** \brief Prepares printer for probing commands.
 
-    Probing can not start under all conditions. This command therefore makes sure,
-    a probing command can be executed by:
-    - Ensuring all axes are homed.
-    - Going to a low z position for fast measuring.
-    - Go to a position, where enabling the z-probe is possible without leaving the valid print area.
-    */
-    static void prepareForProbing();
-#endif
+    static void enableRescue(bool on);
+    static bool isRescue();
+    static bool isRescueRequired();
+    static void rescueReport(); // Send report
+    static void rescueStoreReceivedPosition();
+    static void rescueStorePosition();
+    static void rescueRecover();
+    static void rescueSetup();
+    static void rescueReset();
+    static int rescueStartTool();
+    static void handlePowerLoss();
+    static void parkSafety();
+    static void unparkSafety();
+    static void enableFailedModeP(PGM_P msg);
+    static void enableFailedMode(char* msg);
+    static void playDefaultSound(DefaultSounds sound);
 };
 
 #endif // PRINTER_H_INCLUDED

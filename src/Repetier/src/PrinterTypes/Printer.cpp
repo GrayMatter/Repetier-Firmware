@@ -18,24 +18,42 @@
 
 #include "Repetier.h"
 
-ServoInterface* servos[NUM_SERVOS] = SERVO_LIST;
-PWMHandler* fans[] = FAN_LIST;
+#if X_STEP_PIN < 0 || Y_STEP_PIN < 0 || Z_STEP_PIN < 0
+#error One of the following pins is not assigned: X_STEP_PIN,Y_STEP_PIN,Z_STEP_PIN
+#endif
+#if PRINTLINE_CACHE_SIZE < 4
+#error PRINTLINE_CACHE_SIZE must be at least 5
+#endif
+
+//Inactivity shutdown variables
+millis_t previousMillisCmd = 0;
+millis_t maxInactiveTime = MAX_INACTIVE_TIME * 1000L;
+millis_t stepperInactiveTime = STEPPER_INACTIVE_TIME * 1000L;
+int32_t baudrate = BAUDRATE; ///< Communication speed rate.
+volatile int waitRelax = 0;  // Delay filament relax at the end of print, could be a simple timeout
+
+ServoInterface* servos[] = SERVO_LIST;
+constexpr int numServos = std::extent<decltype(servos)>::value;
+static_assert(numServos == NUM_SERVOS, "NUM_SERVOS not defined correctly");
+
+FanController fans[NUM_FANS];
+
+BeeperSourceBase* beepers[] = BEEPER_LIST;
+constexpr int numBeepers = std::extent<decltype(beepers)>::value;
+static_assert(numBeepers == NUM_BEEPERS, "NUM_BEEPERS not defined correctly");
+
 uint8_t Printer::unitIsInches = 0; ///< 0 = Units are mm, 1 = units are inches.
 //Stepper Movement Variables
-#if DRIVE_SYSTEM != DELTA
-int32_t Printer::zCorrectionStepsIncluded = 0;
-#endif
-#if FEATURE_BABYSTEPPING
-int16_t Printer::zBabystepsMissing = 0;
-int16_t Printer::zBabysteps = 0;
-#endif
 uint8_t Printer::relativeCoordinateMode = false;         ///< Determines absolute (false) or relative Coordinates (true).
 uint8_t Printer::relativeExtruderCoordinateMode = false; ///< Determines Absolute or Relative E Codes while in Absolute Coordinates mode. E is always relative in Relative Coordinates mode.
 
+PromptDialogCallback Printer::activePromptDialog = nullptr; ///< Dialog ID that is active
+bool Printer::promptSupported = false;                      ///< At least one connecte dhost supports host prompts
 uint8_t Printer::flag0 = 0;
 uint8_t Printer::flag1 = 0;
 uint8_t Printer::flag2 = 0;
 uint8_t Printer::flag3 = 0;
+uint8_t Printer::reportFlag = 0;
 uint8_t Printer::debugLevel = 6; ///< Bitfield defining debug output. 1 = echo, 2 = info, 4 = error, 8 = dry run., 16 = Only communication, 32 = No moves
 uint16_t Printer::menuMode = 0;
 float Printer::extrudeMultiplyError = 0;
@@ -46,15 +64,17 @@ int Printer::currentLayer = 0;
 int Printer::maxLayer = -1;       // -1 = unknown
 char Printer::printName[21] = ""; // max. 20 chars + 0
 float Printer::progress = 0;
+
 millis_t Printer::lastTempReport = 0;
+millis_t Printer::autoTempReportPeriodMS = 1000;
+millis_t Printer::lastSDReport = 0;
+millis_t Printer::autoSDReportPeriodMS = 0;
+
 int32_t Printer::printingTime = 0;
 
-uint32_t Printer::interval = 30000; ///< Last step duration in ticks.
-uint32_t Printer::timer;            ///< used for acceleration/deceleration timing
-uint32_t Printer::stepNumber;       ///< Step number in current move.
-#if FEATURE_Z_PROBE || MAX_HARDWARE_ENDSTOP_Z || NONLINEAR_SYSTEM
-int32_t Printer::stepsRemainingAtZHit;
-#endif
+uint32_t Printer::interval = 30000;      ///< Last step duration in ticks.
+uint32_t Printer::timer;                 ///< used for acceleration/deceleration timing
+uint32_t Printer::stepNumber;            ///< Step number in current move.
 float Printer::feedrate;                 ///< Last requested feedrate.
 int Printer::feedrateMultiply;           ///< Multiplier for feedrate in percent (factor 1 = 100)
 unsigned int Printer::extrudeMultiply;   ///< Flow multiplier in percent (factor 1 = 100)
@@ -68,15 +88,22 @@ float Printer::backlashY;
 float Printer::backlashZ;
 uint8_t Printer::backlashDir;
 #endif
-#if FAN_THERMO_PIN > -1
-float Printer::thermoMinTemp = FAN_THERMO_MIN_TEMP;
-float Printer::thermoMaxTemp = FAN_THERMO_MAX_TEMP;
-#endif
 #ifdef DEBUG_PRINT
 int debugWaitLoop = 0;
 #endif
 fast8_t Printer::wizardStackPos;
 wizardVar Printer::wizardStack[WIZARD_STACK_SIZE];
+uint16_t Printer::rescuePos;       // EEPROM address for rescue
+fast8_t Printer::safetyParked = 0; /// True if moved to a safety position to protect print
+uint8_t Printer::rescueOn = false;
+bool Printer::failedMode = false;
+#ifndef CASE_LIGHT_DEFAULT_ON
+#define CASE_LIGHT_DEFAULT_ON 0
+#endif
+fast8_t Printer::caseLightMode = CASE_LIGHT_DEFAULT_ON;
+fast8_t Printer::caseLightBrightness = 255;
+
+ufast8_t Printer::toneVolume = DEFAULT_TONE_VOLUME;
 
 FirmwareEvent FirmwareEvent::eventList[4];
 volatile fast8_t FirmwareEvent::start = 0;
@@ -101,7 +128,7 @@ void FirmwareEvent::handleEvents() {
     while (length > 0) {
         FirmwareEvent& act = eventList[start];
 #undef IO_TARGET
-#define IO_TARGET 14
+#define IO_TARGET IO_TARGET_FIRMWARE_EVENTS
 #include "io/redefine.h"
         {
             InterruptProtectedBlock lock;
@@ -121,8 +148,8 @@ void Printer::setDebugLevel(uint8_t newLevel) {
             // Disable all heaters in case they were on
             HeatManager::disableAllHeaters();
         }
+        Com::printFLN(PSTR("DebugLevel:"), (int)newLevel);
     }
-    Com::printFLN(PSTR("DebugLevel:"), (int)newLevel);
 }
 
 void Printer::toggleEcho() {
@@ -157,55 +184,79 @@ int Printer::getFanSpeed(int fanId) {
     if (fanId < 0 || fanId >= NUM_FANS) {
         return 0;
     }
-    return (int)fans[fanId]->get();
+    return (int)fans[fanId].fan->get();
 }
 
-void Printer::setFanSpeedDirectly(uint8_t speed, int fanId) {
-    uint8_t trimmedSpeed = TRIM_FAN_PWM(speed);
+void Printer::setFanSpeed(int speed, bool immediately, int fanId, uint32_t timeoutMS) {
     if (fanId < 0 || fanId >= NUM_FANS) {
         return;
     }
-    fans[fanId]->set(trimmedSpeed);
-}
-
-void Printer::setFanSpeed(int speed, bool immediately, int fanId) {
-    if (fanId < 0 || fanId >= NUM_FANS) {
-        return;
-    }
-    speed = constrain(speed, 0, 255);
+    speed = TRIM_FAN_PWM(constrain(speed, 0, 255));
     Tool* tool = nullptr;
     Tool* activeTool = Tool::getActiveTool();
+    if (timeoutMS) {
+        fans[fanId].timeout = timeoutMS;
+        fans[fanId].target = speed;
+        fans[fanId].time = HAL::timeInMilliseconds();
+        return;
+    }
+
+    if (fans[fanId].timeout) { // remove existing timeout
+        fans[fanId].timeout = 0;
+        fans[fanId].target = 0;
+        fans[fanId].time = 0;
+    }
     Com::printF(PSTR("Fanspeed"), fanId);
     Com::printFLN(Com::tColon, speed);
-    if (activeTool != nullptr && activeTool->usesSecondary(fans[fanId])) {
+    if (activeTool != nullptr && activeTool->usesSecondary(fans[fanId].fan)) {
         tool = activeTool;
         tool->setSecondaryFixed(speed);
         if (!immediately && Motion1::buffersUsed()) {
             return;
         }
     }
-    if (Printer::getFanSpeed(fanId) == speed)
-        return;
+    if (Printer::getFanSpeed(fanId) == speed) {
+        return; // nothing to do
+    }
     if (tool && immediately) {
         Printer::setMenuMode(MENU_MODE_FAN_RUNNING, speed != 0);
         if (Motion1::length == 0 || immediately) {
             if (Tool::getActiveTool() && Tool::getActiveTool()->secondaryIsFan()) {
-                for (fast8_t i = 0; i < PRINTLINE_CACHE_SIZE; i++)
+                for (fast8_t i = 0; i < PRINTLINE_CACHE_SIZE; i++) {
                     Motion1::buffers[i].secondSpeed = speed; // fill all printline buffers with new fan speed value
+                }
             }
         }
     }
-    Printer::setFanSpeedDirectly(speed, fanId);
+    fans[fanId].fan->set(speed);
+}
+
+void Printer::checkFanTimeouts() {
+    for (fast8_t i = 0; i < NUM_FANS; i++) {
+        if (fans[i].timeout) {
+            if ((HAL::timeInMilliseconds() - fans[i].time) > fans[i].timeout) {
+                EVENT_FAN_TIMEOUT(i, fans[i].target);
+                Printer::setFanSpeed(fans[i].target, true, i);
+            }
+        }
+    }
 }
 
 bool Printer::updateDoorOpen() {
 #if defined(DOOR_PIN) && DOOR_PIN > -1 //  && SUPPORT_LASER should always be respected
     bool isOpen = isDoorOpen();
     uint8_t b = READ(DOOR_PIN) != DOOR_INVERTING;
-    if (!b && isOpen) {
+    if (b && !isOpen) {
         UI_STATUS_F(Com::tSpace);
-    } else if (b && !isOpen) {
-        Com::printWarningFLN(Com::tDoorOpen);
+        bool all = Com::writeToAll;
+        Com::writeToAll = true;
+        Com::printFLN(PSTR("DoorOpened"));
+        Com::writeToAll = all;
+    } else if (!b && isOpen) {
+        bool all = Com::writeToAll;
+        Com::writeToAll = true;
+        Com::printFLN(PSTR("DoorClosed"));
+        Com::writeToAll = all;
         UI_STATUS_F(Com::tDoorOpen);
     }
     flag3 = (b ? flag3 | PRINTER_FLAG3_DOOR_OPEN : flag3 & ~PRINTER_FLAG3_DOOR_OPEN);
@@ -216,7 +267,7 @@ bool Printer::updateDoorOpen() {
 }
 
 void Printer::updateDerivedParameter() {
-#if DRIVE_SYSTEM == DELTA
+    /*#if DRIVE_SYSTEM == DELTA
 #else
 // For which directions do we need backlash compensation
 #if ENABLE_BACKLASH_COMPENSATION
@@ -229,26 +280,14 @@ void Printer::updateDerivedParameter() {
         backlashDir |= 32;
 #endif
 #endif
-
-    /*
-    maxInterval = F_CPU / (minimumSpeed * axisStepsPerMM[X_AXIS]);
-    uint32_t tmp = F_CPU / (minimumSpeed * axisStepsPerMM[Y_AXIS]);
-    if(tmp < maxInterval)
-        maxInterval = tmp;
-#if DRIVE_SYSTEM != DELTA
-    tmp = F_CPU / (minimumZSpeed * axisStepsPerMM[Z_AXIS]);
-    if(tmp < maxInterval)
-        maxInterval = tmp;
-#endif
 */
-    //Com::printFLN(PSTR("Minimum Speed:"),minimumSpeed);
-    //Com::printFLN(PSTR("Minimum Speed Z:"),minimumZSpeed);
     EVENT_UPDATE_DERIVED;
 }
 #if AUTOMATIC_POWERUP
 void Printer::enablePowerIfNeeded() {
-    if (Printer::isPowerOn())
+    if (Printer::isPowerOn()) {
         return;
+    }
     SET_OUTPUT(PS_ON_PIN); //GND
     Printer::setPowerOn(true);
     WRITE(PS_ON_PIN, (POWER_INVERTING ? HIGH : LOW));
@@ -261,10 +300,12 @@ void Printer::enablePowerIfNeeded() {
 */
 void Printer::kill(uint8_t onlySteppers) {
     EVENT_KILL(onlySteppers);
-    if (areAllSteppersDisabled() && onlySteppers)
+    if (areAllSteppersDisabled() && onlySteppers) {
         return;
-    if (Printer::isAllKilled())
+    }
+    if (Printer::isAllKilled()) {
         return;
+    }
 #if defined(NUM_MOTOR_DRIVERS) && NUM_MOTOR_DRIVERS > 0
     disableAllMotorDrivers();
 #endif // defined
@@ -273,14 +314,24 @@ void Printer::kill(uint8_t onlySteppers) {
 #if defined(PREVENT_Z_DISABLE_ON_STEPPER_TIMEOUT) && PREVENT_Z_DISABLE_ON_STEPPER_TIMEOUT == 0
     ZMotor.disable();
 #else
-    if (!onlySteppers)
+    if (!onlySteppers) {
         ZMotor.disable();
+    }
 #endif
     for (fast8_t i = A_AXIS; i < NUM_AXES; i++) {
         Motion1::motors[i]->disable();
     }
     Tool::disableMotors();
-    setAllSteppersDiabled();
+    setAllSteppersDisabled();
+
+    FOR_ALL_AXES(i) {
+#if defined(PREVENT_Z_DISABLE_ON_STEPPER_TIMEOUT) && PREVENT_Z_DISABLE_ON_STEPPER_TIMEOUT == 1
+        if (i == Z_AXIS) {
+            continue;
+        }
+#endif
+        Motion1::setAxisHomed(i, false);
+    }
     unsetHomedAll();
     if (!onlySteppers) {
         for (uint8_t i = 0; i < NUM_TOOLS; i++) {
@@ -300,7 +351,7 @@ void Printer::kill(uint8_t onlySteppers) {
     } else {
         UI_STATUS_UPD("Motors disabled");
     }
-    Commands::printTemperatures(false);
+    Commands::printTemperatures();
 }
 
 // This is for untransformed move to coordinates in printers absolute Cartesian space
@@ -328,11 +379,14 @@ void Printer::setOrigin(float xOff, float yOff, float zOff) {
 
 void Printer::setPrinting(uint8_t b) {
     if (!!isPrinting != !!b) { // Start with progress on print start
+#if FEATURE_CONTROLLER != NO_CONTROLLER
         if (b) {
             GUI::callbacks[0] = printProgress;
         } else {
             GUI::callbacks[0] = startScreen;
         }
+        GUI::resetMenu();
+#endif
     }
     flag3 = (b ? flag3 | PRINTER_FLAG3_PRINTING : flag3 & ~PRINTER_FLAG3_PRINTING);
     Printer::setMenuMode(MENU_MODE_PRINTING, b);
@@ -424,17 +478,27 @@ void Printer::setDestinationStepsFromGCode(GCode* com) {
         p = convertToMM(com->E);
         HeatManager* heater = Tool::getActiveTool()->getHeater();
         if (relativeCoordinateMode || relativeExtruderCoordinateMode) {
-            if (fabs(com->E) * extrusionFactor > EXTRUDE_MAXLENGTH) {
-                Com::printWarningF(PSTR("MAx. extrusion distance per move exceeded - ignoring move."));
-                p = 0;
+            if (fabsf(com->E) * extrusionFactor > EXTRUDE_MAXLENGTH) {
+                Com::printWarningF(PSTR("Max. extrusion distance per move exceeded - ignoring move."));
+                p = 0.0f;
             }
             coords[E_AXIS] = Motion1::currentPosition[E_AXIS] + p;
         } else {
-            if (fabs(p - Motion1::currentPosition[E_AXIS]) * extrusionFactor > EXTRUDE_MAXLENGTH) {
+            if (fabsf(p - Motion1::currentPosition[E_AXIS]) * extrusionFactor > EXTRUDE_MAXLENGTH) {
                 p = Motion1::currentPosition[E_AXIS];
             }
             coords[E_AXIS] = p;
         }
+#if FEATURE_RETRACTION
+        if (com->hasNoXYZ() && isAutoretract()) { // Lone E moves.
+            if (relativeCoordinateMode || relativeExtruderCoordinateMode) {
+                Tool::getActiveTool()->retract(com->E < 0.0f, false);
+            } else {
+                Tool::getActiveTool()->retract(p < Motion1::currentPosition[E_AXIS], false);
+            }
+            return;
+        }
+#endif
         secondaryMove = Tool::getActiveTool()->isSecondaryMove(com->hasG() && com->G == 0, true);
     } else {
         coords[E_AXIS] = Motion1::currentPosition[E_AXIS];
@@ -442,23 +506,24 @@ void Printer::setDestinationStepsFromGCode(GCode* com) {
     }
     if (com->hasF() && com->F > 0.1) {
         if (unitIsInches) {
-            feedrate = com->F * 0.0042333f * (float)feedrateMultiply; // Factor is 25.5/60/100
+            feedrate = com->F * 0.0042333f * (float)feedrateMultiply; // Factor is 25.4/60/100
         } else {
-            feedrate = com->F * (float)feedrateMultiply * 0.00016666666f;
+            feedrate = com->F * (float)feedrateMultiply * 0.00016666666f; // Factor is 1/60/100
         }
     }
-    Motion1::moveByOfficial(coords, Printer::feedrate, secondaryMove);
+    Motion1::moveByOfficial(coords, feedrate, secondaryMove);
 }
 
 void Printer::setup() {
     HAL::stopWatchdog();
 
-    // Start serial
-    HAL::hwSetup();
     // Main board specific extra initialization
 #if defined(MB_SETUP)
     MB_SETUP;
 #endif
+    // HAL::serialSetBaudrate(115200);
+    // Start serial
+    HAL::hwSetup();
 
     EEPROM::initBaudrate();
     HAL::serialSetBaudrate(baudrate);
@@ -477,6 +542,9 @@ void Printer::setup() {
     Printer::setPowerOn(true);
 #endif
 #endif
+
+    Printer::setNativeUSB(!GCodeSource::hasBaudSources());
+
 #if SDSUPPORT
     //power to SD reader
 #if SDPOWER > -1
@@ -488,10 +556,22 @@ void Printer::setup() {
     PULLUP(SDCARDDETECT, HIGH);
 #endif
 #endif
+#ifndef NO_SPI
+    HAL::spiInit();
+#endif
     // Define io functions
 #undef IO_TARGET
-#define IO_TARGET 1
+#define IO_TARGET IO_TARGET_INIT
 #include "io/redefine.h"
+
+    PWMHandler* tempFans[] = FAN_LIST;
+    constexpr int numFans = std::extent<decltype(tempFans)>::value;
+    static_assert(numFans == NUM_FANS, "NUM_FANS not defined correctly");
+
+    for (fast8_t i = 0; i < NUM_FANS; i++) {
+        fans[i].fan = tempFans[i];
+    }
+    HAL::analogStart();
 
     Motion1::init();
     Motion2::init();
@@ -501,12 +581,15 @@ void Printer::setup() {
     Leveling::init();
     PrinterType::init();
     Tool::initTools();
+    rescuePos = EEPROM::reserveRecover(1, 1, EPR_RESCUE_SIZE);
+
+#undef IO_TARGET
+#define IO_TARGET IO_TARGET_INIT_LATE
+#include "io/redefine.h"
+
 #if FEATURE_CONTROLLER == CONTROLLER_VIKI
     HAL::delayMilliseconds(100);
 #endif // FEATURE_CONTROLLER
-#if UI_DISPLAY_TYPE != NO_DISPLAY
-    Com::selectLanguage(0); // just make sure we have a language in case someone uses it early
-#endif
     //HAL::delayMilliseconds(500);  // add a delay at startup to give hardware time for initalization
 
     EVENT_INITIALIZE_EARLY
@@ -518,19 +601,12 @@ void Printer::setup() {
 #endif
 #endif
 
-#if CASE_LIGHTS_PIN >= 0
-    SET_OUTPUT(CASE_LIGHTS_PIN);
-    WRITE(CASE_LIGHTS_PIN, CASE_LIGHT_DEFAULT_ON);
-#endif // CASE_LIGHTS_PIN
 #if defined(UI_VOLTAGE_LEVEL) && defined(EXP_VOLTAGE_LEVEL_PIN) && EXP_VOLTAGE_LEVEL_PIN > -1
     SET_OUTPUT(EXP_VOLTAGE_LEVEL_PIN);
     WRITE(EXP_VOLTAGE_LEVEL_PIN, UI_VOLTAGE_LEVEL);
 #endif // UI_VOLTAGE_LEVEL
 #if defined(SUPPORT_LASER) && SUPPORT_LASER
     LaserDriver::initialize();
-#endif // defined
-#if defined(SUPPORT_CNC) && SUPPORT_CNC
-    CNCDriver::initialize();
 #endif // defined
 
 #ifdef RED_BLUE_STATUS_LEDS
@@ -539,13 +615,10 @@ void Printer::setup() {
     WRITE(BLUE_STATUS_LED, HIGH);
     WRITE(RED_STATUS_LED, LOW);
 #endif // RED_BLUE_STATUS_LEDS
-#if STEPPER_CURRENT_CONTROL != CURRENT_CONTROL_MANUAL
-    motorCurrentControlInit(); // Set current if it is firmware controlled
-#endif
 #if defined(NUM_MOTOR_DRIVERS) && NUM_MOTOR_DRIVERS > 0
     initializeAllMotorDrivers();
 #endif // defined
-    microstepInit();
+    // microstepInit();
     feedrate = 50; ///< Current feedrate in mm/s.
     feedrateMultiply = 100;
     extrudeMultiply = 100;
@@ -553,9 +626,6 @@ void Printer::setup() {
     msecondsPrinting = 0;
     filamentPrinted = 0;
     flag0 = PRINTER_FLAG0_STEPPER_DISABLED;
-#if DRIVE_SYSTEM == DELTA
-    radius0 = ROD_RADIUS;
-#endif
 #if ENABLE_BACKLASH_COMPENSATION
     backlashX = X_BACKLASH;
     backlashY = Y_BACKLASH;
@@ -569,28 +639,26 @@ void Printer::setup() {
     SET_INPUT(MOTOR_FAULT_PIGGY_PIN);
 #endif              //(MOTHERBOARD == 501) || (MOTHERBOARD == 502)
     EEPROM::init(); // Read settings from eeprom if wanted, run after initialization!
-    HAL::analogStart();
     // Extruder::initExtruder();
     // sets auto leveling in eeprom init
     GUI::init();
-    //Commands::printCurrentPosition();
 
+#if SDSUPPORT // Try mounting the SDCard first in case it has an eeprom file.
+    sd.mount(true);
+#endif
+
+    EEPROM::init(); // Read settings from eeprom if wanted, run after initialization!
     updateDerivedParameter();
     Commands::checkFreeMemory();
     Commands::writeLowestFreeRAM();
-    HAL::delayMilliseconds(20);
     HAL::setupTimer();
-    HAL::delayMilliseconds(20);
 
-#if SDSUPPORT
-    sd.mount();
-#endif
+
 #if FEATURE_WATCHDOG
     HAL::startWatchdog();
-#endif // FEATURE_WATCHDOG
-    HAL::delayMilliseconds(20);
+#endif
 
-    Tool::selectTool(0);
+    Tool::selectTool(rescueStartTool());
     // Extruder::selectExtruderById(0);
     HAL::delayMilliseconds(20);
 
@@ -598,55 +666,53 @@ void Printer::setup() {
 #ifdef STARTUP_GCODE
     GCode::executeFString(Com::tStartupGCode);
 #endif
-#if EEPROM_MODE != 0 && UI_DISPLAY_TYPE != NO_DISPLAY
-    if (EEPROM::getStoredLanguage() == 254) {
-        Com::printFLN(PSTR("Needs language selection"));
-        uid.showLanguageSelectionWizard();
-    }
-#endif // EEPROM_MODE
-    HAL::delayMilliseconds(20);
+    rescueSetup();
+    playDefaultSound(DefaultSounds::RESET);
 }
 
 void Printer::defaultLoopActions() {
     Commands::checkForPeriodicalActions(true); //check heater every n milliseconds
+    if (HAL::i2cError && HAL::i2cError != 255) {
+        HAL::i2cError = 255; // Flag to show error message only once
+        GCode::fatalError(Com::tI2CError);
+    }
     millis_t curtime = HAL::timeInMilliseconds();
-    if (Motion1::length != 0 || isMenuMode(MENU_MODE_SD_PRINTING + MENU_MODE_PAUSED))
+    if (isRescueRequired() || Motion1::length != 0 || isMenuMode(MENU_MODE_SD_PRINTING + MENU_MODE_PAUSED)) {
         previousMillisCmd = curtime;
-    else {
+    } else {
         curtime -= previousMillisCmd;
-        if (maxInactiveTime != 0 && curtime > maxInactiveTime)
+        if (maxInactiveTime != 0 && curtime > maxInactiveTime) {
             Printer::kill(false);
-        else
+        } else {
             Printer::setAllKilled(false); // prevent repeated kills
-        if (stepperInactiveTime != 0 && curtime > stepperInactiveTime)
+        }
+        if (stepperInactiveTime != 0 && curtime > stepperInactiveTime) {
             Printer::kill(true);
+        }
     }
 #if SDCARDDETECT > -1 && SDSUPPORT
-    sd.automount();
+    if(Printer::isAutomount()) {
+        sd.automount();
+    }
 #endif
-#if defined(EEPROM_AVAILABLE) && EEPROM_AVAILABLE == EEPROM_SDCARD
+#if defined(EEPROM_AVAILABLE) && (EEPROM_AVAILABLE == EEPROM_SDCARD || EEPROM_AVAILABLE == EEPROM_FLASH)
     HAL::syncEEPROM();
 #endif
-
     DEBUG_MEMORY;
 }
 
-void Printer::setCaseLight(bool on) {
-#if CASE_LIGHTS_PIN > -1
-    WRITE(CASE_LIGHTS_PIN, on);
-    reportCaseLightStatus();
-#endif
-}
-
 void Printer::reportCaseLightStatus() {
-#if CASE_LIGHTS_PIN > -1
-    if (READ(CASE_LIGHTS_PIN))
+    if (Printer::caseLightMode) {
         Com::printInfoFLN(PSTR("Case lights on"));
-    else
+    } else {
         Com::printInfoFLN(PSTR("Case lights off"));
-#else
-    Com::printInfoFLN(PSTR("No case lights"));
-#endif
+    }
+    Com::printInfoF(PSTR("Case light mode:"));
+    Com::print((int32_t)caseLightMode);
+    Com::println();
+    Com::printInfoF(PSTR("Case light brightness:"));
+    Com::print((int32_t)caseLightBrightness);
+    Com::println();
 }
 
 void Printer::handleInterruptEvent() {
@@ -657,8 +723,9 @@ void Printer::handleInterruptEvent() {
     switch (event) {
 #if EXTRUDER_JAM_CONTROL
     case PRINTER_INTERRUPT_EVENT_JAM_DETECTED:
-        if (isJamcontrolDisabled())
+        if (isJamcontrolDisabled()) {
             break;
+        }
         EVENT_JAM_DETECTED;
         Com::printFLN(PSTR("important:Extruder jam detected"));
         UI_ERROR_P(Com::translatedF(UI_TEXT_EXTRUDER_JAM_ID));
@@ -669,7 +736,7 @@ void Printer::handleInterruptEvent() {
 #endif
 #elif JAM_ACTION == 2 // pause host/print
 #if SDSUPPORT
-        if (sd.sdmode == 2) {
+        if (sd.state == SDState::SD_PRINTING) {
             sd.pausePrint(true);
             break;
         }
@@ -718,8 +785,9 @@ void Printer::showConfiguration() {
     Com::config(PSTR("InputBuffer:"), SERIAL_BUFFER_SIZE - 1);
 #endif
     Com::config(PSTR("NumExtruder:"), NUM_TOOLS);
-    Com::config(PSTR("MixingExtruder:"), MIXING_EXTRUDER);
+    // Com::config(PSTR("MixingExtruder:"), MIXING_EXTRUDER);
     Com::config(PSTR("HeatedBed:"), NUM_HEATED_BEDS);
+    Com::config(PSTR("HeatedChamber:"), NUM_HEATED_CHAMBERS);
     Com::config(PSTR("SDCard:"), SDSUPPORT);
     Com::config(PSTR("Fan:"), NUM_FANS > 0);
 #if NUM_FANS > 1
@@ -733,7 +801,7 @@ void Printer::showConfiguration() {
     Com::config(PSTR("XHomeDir:"), Motion1::homeDir[X_AXIS]);
     Com::config(PSTR("YHomeDir:"), Motion1::homeDir[Y_AXIS]);
     Com::config(PSTR("ZHomeDir:"), Motion1::homeDir[Z_AXIS]);
-#if PRINTER_TYPE == 2
+#if PRINTER_TYPE == PRINTER_TYPE_DELTA
 #if FIXED_Z_HOME_POSITION
     Com::config(PSTR("XHomePos:"), (float)ZHOME_X_POS, 2);
     Com::config(PSTR("YHomePos:"), (float)ZHOME_Y_POS, 2);
@@ -753,25 +821,24 @@ void Printer::showConfiguration() {
 #endif
     Com::config(PSTR("SupportG10G11:"), FEATURE_RETRACTION);
     Com::config(PSTR("SupportLocalFilamentchange:"), FEATURE_RETRACTION);
-    Com::config(PSTR("CaseLights:"), CASE_LIGHTS_PIN > -1);
-    Com::config(PSTR("ZProbe:"), FEATURE_Z_PROBE);
-    Com::config(PSTR("Autolevel:"), FEATURE_AUTOLEVEL);
+    Com::config(PSTR("CaseLights:"), 1);
+    Com::config(PSTR("ZProbe:"), Z_PROBE_TYPE > 0 ? 1 : 0);
+    Com::config(PSTR("Autolevel:"), LEVELING_METHOD > 0 ? 1 : 0);
     Com::config(PSTR("EEPROM:"), EEPROM_MODE != 0);
     Com::config(PSTR("PrintlineCache:"), PRINTLINE_CACHE_SIZE);
     Com::config(PSTR("JerkXY:"), Motion1::maxYank[X_AXIS]);
     Com::config(PSTR("KeepAliveInterval:"), KEEP_ALIVE_INTERVAL);
-#if PRINTER_TYPE != 2
+#if PRINTER_TYPE != PRINTER_TYPE_DELTA
     Com::config(PSTR("JerkZ:"), Motion1::maxYank[Z_AXIS]);
 #endif
 #if FEATURE_RETRACTION
-    // TODO: Report retraction
-    /* Com::config(PSTR("RetractionLength:"), EEPROM_FLOAT(RETRACTION_LENGTH));
-    Com::config(PSTR("RetractionLongLength:"), EEPROM_FLOAT(RETRACTION_LONG_LENGTH));
-    Com::config(PSTR("RetractionSpeed:"), EEPROM_FLOAT(RETRACTION_SPEED));
-    Com::config(PSTR("RetractionZLift:"), EEPROM_FLOAT(RETRACTION_Z_LIFT));
-    Com::config(PSTR("RetractionUndoExtraLength:"), EEPROM_FLOAT(RETRACTION_UNDO_EXTRA_LENGTH));
-    Com::config(PSTR("RetractionUndoExtraLongLength:"), EEPROM_FLOAT(RETRACTION_UNDO_EXTRA_LONG_LENGTH));
-    Com::config(PSTR("RetractionUndoSpeed:"), EEPROM_FLOAT(RETRACTION_UNDO_SPEED));*/
+    Com::config(PSTR("RetractionLength:"), Motion1::retractLength);
+    Com::config(PSTR("RetractionLongLength:"), Motion1::retractLongLength);
+    Com::config(PSTR("RetractionSpeed:"), Motion1::retractSpeed);
+    Com::config(PSTR("RetractionZLift:"), Motion1::retractZLift);
+    Com::config(PSTR("RetractionUndoExtraLength:"), Motion1::retractUndoExtraLength);
+    Com::config(PSTR("RetractionUndoExtraLongLength:"), Motion1::retractUndoExtraLongLength);
+    Com::config(PSTR("RetractionUndoSpeed:"), Motion1::retractUndoSpeed);
 #endif // FEATURE_RETRACTION
     Com::config(PSTR("XMin:"), Motion1::minPos[X_AXIS]);
     Com::config(PSTR("YMin:"), Motion1::minPos[Y_AXIS]);
@@ -782,19 +849,18 @@ void Printer::showConfiguration() {
     Com::config(PSTR("XSize:"), Motion1::maxPos[X_AXIS] - Motion1::minPos[X_AXIS]);
     Com::config(PSTR("YSize:"), Motion1::maxPos[Y_AXIS] - Motion1::minPos[Y_AXIS]);
     Com::config(PSTR("ZSize:"), Motion1::maxPos[Z_AXIS] - Motion1::minPos[Z_AXIS]);
-    Com::config(PSTR("XPrintAccel:"), Motion1::maxAcceleration[X_AXIS]);
-    Com::config(PSTR("YPrintAccel:"), Motion1::maxAcceleration[Y_AXIS]);
-    Com::config(PSTR("ZPrintAccel:"), Motion1::maxAcceleration[Z_AXIS]);
-    Com::config(PSTR("XTravelAccel:"), Motion1::maxAcceleration[X_AXIS]);
-    Com::config(PSTR("YTravelAccel:"), Motion1::maxAcceleration[Y_AXIS]);
-    Com::config(PSTR("ZTravelAccel:"), Motion1::maxAcceleration[Z_AXIS]);
-#if PRINTER_TYPE == 2
-    Com::config(PSTR("PrinterType:Delta"));
-#else
-    Com::config(PSTR("PrinterType:Cartesian"));
-#endif // PRINTER_TYPE
+    Com::config(PSTR("XPrintAccel:"), Motion1::maxAccelerationEEPROM[X_AXIS]);
+    Com::config(PSTR("YPrintAccel:"), Motion1::maxAccelerationEEPROM[Y_AXIS]);
+    Com::config(PSTR("ZPrintAccel:"), Motion1::maxAccelerationEEPROM[Z_AXIS]);
+    Com::config(PSTR("XTravelAccel:"), Motion1::maxTravelAccelerationEEPROM[X_AXIS]);
+    Com::config(PSTR("YTravelAccel:"), Motion1::maxTravelAccelerationEEPROM[Y_AXIS]);
+    Com::config(PSTR("ZTravelAccel:"), Motion1::maxTravelAccelerationEEPROM[Z_AXIS]);
+    PrinterType::M360();
     if (NUM_HEATED_BEDS > 0) {
         Com::config(PSTR("MaxBedTemp:"), heatedBeds[0]->getMaxTemperature());
+    }
+    if (NUM_HEATED_CHAMBERS > 0) {
+        Com::config(PSTR("MaxChamberTemp:"), heatedChambers[0]->getMaxTemperature());
     }
     for (fast8_t i = 0; i < NUM_TOOLS; i++) {
         Tool* t = Tool::getTool(i);
@@ -819,7 +885,7 @@ void Printer::showJSONStatus(int type) {
     if (Motion1::length == 0) {
         Com::print('I'); // IDLING
 #if SDSUPPORT
-    } else if (sd.sdactive) {
+    } else if (sd.state == SDState::SD_PRINTING) {
         Com::print('P'); // SD PRINTING
 #endif
     } else {
@@ -907,8 +973,9 @@ void Printer::showJSONStatus(int type) {
     //  "extr": [0.0, 0.0],
     Com::printF(PSTR("],\"extr\":["));
     for (int i = 0; i < NUM_TOOLS; i++) {
-        if (i)
+        if (i) {
             Com::print(',');
+        }
         if (Tool::getTool(i)->getHeater() != nullptr) {
             Com::print(Tool::getTool(i)->getHeater()->getCurrentTemperature());
         } else {
@@ -920,18 +987,20 @@ void Printer::showJSONStatus(int type) {
     //  "efactor": [100.00, 100.00],
     Com::printF(PSTR(",\"efactor\":["));
     for (int i = 0; i < NUM_TOOLS; i++) {
-        if (i)
+        if (i) {
             Com::print(',');
+        }
         Com::print((int)Printer::extrudeMultiply);
     }
     //  "tool": 0,
     Com::printF(PSTR("],\"tool\":"), Tool::getActiveToolId());
     //"probe": "4",
     Com::printF(PSTR(",\"probe\":"));
-    if (ZProbe->triggered())
+    if (ZProbe && ZProbe->triggered()) {
         Com::print((int)0);
-    else
+    } else {
         Com::print((int)1000);
+    }
     //  "fanPercent": [0.00, 100.00],
     Com::printF(PSTR(",\"fanPercent\":["));
     for (int i = 0; i < NUM_FANS; i++) {
@@ -946,33 +1015,29 @@ void Printer::showJSONStatus(int type) {
     Com::printF(PSTR(",\"homed\":["));
     Com::print((int)Motion1::isAxisHomed(X_AXIS));
     Com::print(',');
-    Com::print(Motion1::isAxisHomed(Y_AXIS));
+    Com::print((int)Motion1::isAxisHomed(Y_AXIS));
     Com::print(',');
-    Com::print(Motion1::isAxisHomed(Z_AXIS));
+    Com::print((int)Motion1::isAxisHomed(Z_AXIS));
     Com::printF(PSTR("]"));
     if (type == 1) {
-        //  "geometry": "cartesian",
-#if DRIVE_SYSTEM == DELTA
-        Com::printF(PSTR(",\"geometry\":\"Delta\""));
-#else
-        Com::printF(PSTR(",\"geometry\":\"Cartesian\""));
-#endif
-        //  "myName": "Ormerod"
-        Com::printF(PSTR(",\"myName\":\"" UI_PRINTER_NAME "\""));
+        Com::printF(PSTR(",\"geometry\":\""));
+        Com::printF(PrinterType::getGeometryName());
+        Com::printF(PSTR("\",\"myName\":\"" UI_PRINTER_NAME "\""));
         Com::printF(PSTR(",\"firmwareName\":\"Repetier\""));
     }
     Com::printF(PSTR(",\"coords\": {"));
     Com::printF(PSTR("\"axesHomed\":["));
     Com::print((int)Motion1::isAxisHomed(X_AXIS));
     Com::print(',');
-    Com::print(Motion1::isAxisHomed(Y_AXIS));
+    Com::print((int)Motion1::isAxisHomed(Y_AXIS));
     Com::print(',');
-    Com::print(Motion1::isAxisHomed(Z_AXIS));
+    Com::print((int)Motion1::isAxisHomed(Z_AXIS));
     Com::printF(PSTR("],\"extr\":["));
     firstOccurrence = true;
     for (int i = 0; i < NUM_TOOLS; i++) {
-        if (!firstOccurrence)
+        if (!firstOccurrence) {
             Com::print(',');
+        }
         Com::print(Motion1::currentPosition[Z_AXIS]);
         firstOccurrence = false;
     }
@@ -1075,20 +1140,12 @@ void Printer::showJSONStatus(int type) {
         // UNTIL PRINT ESTIMATE TIMES ARE IMPLEMENTED
         // NO DURATION INFO IS SUPPORTED
         Com::printF(PSTR(",\"coldExtrudeTemp\":0,\"coldRetractTemp\":0.0,\"geometry\":\""));
-#if (DRIVE_SYSTEM == DELTA)
-        Com::printF(PSTR("delta"));
-#elif (DRIVE_SYSTEM == CARTESIAN || DRIVE_SYSTEM == GANTRY_FAKE)
-        Com::printF(PSTR("cartesian"));
-#elif ((DRIVE_SYSTEM == XY_GANTRY) || (DRIVE_SYSTEM == YX_GANTRY))
-        Com::printF(PSTR("coreXY"));
-#elif (DRIVE_SYSTEM == XZ_GANTRY)
-        Com::printF(PSTR("coreXZ"));
-#endif
+        Com::printF(PrinterType::getGeometryName());
         Com::printF(PSTR("\",\"name\":\""));
-        Com::printF(PSTR(UI_PRINTER_NAME));
+        Com::printF(Com::tPrinterName);
         Com::printF(PSTR("\",\"tools\":["));
         firstOccurrence = true;
-        for (int i = 0; i < NUM_EXTRUDER; i++) {
+        for (int i = 0; i < NUM_TOOLS; i++) {
             if (!firstOccurrence)
                 Com::print(',');
             Com::printF(PSTR("{\"number\":"));
@@ -1102,7 +1159,7 @@ void Printer::showJSONStatus(int type) {
     case 3:
         Com::printF(PSTR(",\"currentLayer\":"));
 #if SDSUPPORT
-        if (sd.sdactive && sd.fileInfo.layerHeight > 0) { // ONLY CAN TELL WHEN SD IS PRINTING
+        if (sd.state == SDState::SD_PRINTING && sd.fileInfo.layerHeight > 0) { // ONLY CAN TELL WHEN SD IS PRINTING
             Com::print((int)(Motion1::currentPosition[Z_AXIS] / sd.fileInfo.layerHeight));
         } else
             Com::print('0');
@@ -1119,23 +1176,24 @@ void Printer::showJSONStatus(int type) {
         }
         Com::printF(PSTR("],"));
 #if SDSUPPORT
-        if (sd.sdactive) {
+        if (sd.state == SDState::SD_PRINTING) {
             Com::printF(PSTR("\"fractionPrinted\":"));
             float fraction;
-            if (sd.filesize < 2000000)
-                fraction = sd.sdpos / sd.filesize;
+            if (sd.selectedFileSize < 2000000)
+                fraction = sd.selectedFilePos / sd.selectedFileSize;
             else
-                fraction = (sd.sdpos >> 8) / (sd.filesize >> 8);
+                fraction = (sd.selectedFilePos >> 8) / (sd.selectedFileSize >> 8);
             Com::print((float)floor(fraction * 1000) / 1000); // ONE DECIMAL, COULD BE DONE BY SHIFTING, BUT MEH
             Com::print(',');
         }
 #endif
         Com::printF(PSTR("\"firstLayerHeight\":"));
 #if SDSUPPORT
-        if (sd.sdactive) {
+        if (sd.state == SDState::SD_PRINTING) {
             Com::print(sd.fileInfo.layerHeight);
-        } else
+        } else {
             Com::print('0');
+        }
 #else
         Com::print('0');
 #endif
@@ -1244,4 +1302,251 @@ void Printer::realPosition(float& xp, float& yp, float& zp) {
     xp = Motion1::currentPosition[X_AXIS];
     yp = Motion1::currentPosition[Y_AXIS];
     zp = Motion1::currentPosition[Z_AXIS];
+}
+
+/*
+
+Rescue system uses the following layout in eeprom:
+1 : mode
+4 * NUM_AXES : Last received position
+4 * NUM_AXES : Last position
+4 * NUM_AXES : Last Offsets
+*/
+
+void Printer::enableRescue(bool on) {
+#if HOST_RESCUE
+    if (on && EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE) != 0) {
+        EEPROM::setRecoverByte(rescuePos + EPR_RESCUE_MODE, 0);
+    }
+    rescueOn = on;
+    if (!on) {
+        unparkSafety();
+        GUI::popBusy();
+    }
+    rescueReset(); // enabling/disabling removes old values
+#endif
+}
+
+bool Printer::isRescue() {
+#if HOST_RESCUE
+    return rescueOn;
+#else
+    return false;
+#endif
+}
+
+void Printer::rescueReport() {
+#if HOST_RESCUE
+    uint8_t mode = EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE);
+    Com::printF(PSTR("RESCUE_STATE:"));
+    if (mode & 1) {
+        FOR_ALL_AXES(i) {
+            Com::print(' ');
+            Com::print('L');
+            Com::printF(axisNames[i]);
+            Com::printF(Com::tColon, EEPROM::getRecoverFloat(rescuePos + EPR_RESCUE_LAST_RECEIVED + sizeof(float) * i), 2);
+        }
+        Com::printF(PSTR(" LT:"), (int)EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_TOOL));
+    }
+    if (mode & 2) {
+        FOR_ALL_AXES(i) {
+            Com::print(' ');
+            Com::printF(axisNames[i]);
+            Com::printF(Com::tColon, EEPROM::getRecoverFloat(rescuePos + EPR_RESCUE_LAST_POS + sizeof(float) * i), 2);
+        }
+    }
+    if (mode == 0) {
+        Com::printFLN(PSTR(" OFF"));
+    }
+    Com::println();
+#endif
+}
+
+void Printer::rescueStoreReceivedPosition() {
+#if HOST_RESCUE
+    if (!rescueOn) {
+        return;
+    }
+    FOR_ALL_AXES(i) {
+        EEPROM::setRecoverFloat(rescuePos + EPR_RESCUE_LAST_RECEIVED + sizeof(float) * i, Motion1::currentPosition[i]);
+    }
+    EEPROM::setRecoverByte(rescuePos + EPR_RESCUE_TOOL, Tool::getActiveToolId());
+    EEPROM::setRecoverByte(rescuePos + EPR_RESCUE_MODE, EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE) | 1);
+#endif
+}
+
+void Printer::rescueStorePosition() {
+#if HOST_RESCUE
+    if (!rescueOn) {
+        return;
+    }
+    FOR_ALL_AXES(i) {
+        EEPROM::setRecoverFloat(rescuePos + EPR_RESCUE_LAST_POS + sizeof(float) * i, Motion1::currentPosition[i]);
+        EEPROM::setRecoverFloat(rescuePos + EPR_RESCUE_OFFSETS + sizeof(float) * i, Motion1::g92Offsets[i]);
+    }
+    EEPROM::setRecoverByte(rescuePos + EPR_RESCUE_MODE, EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE) | 2);
+#endif
+}
+
+void Printer::rescueRecover() {
+#if HOST_RESCUE
+    uint8_t mode = EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE);
+    if (mode == 0) {
+        return;
+    }
+    if (mode & 2) {
+        FOR_ALL_AXES(i) {
+            Motion1::currentPosition[i] = EEPROM::getRecoverFloat(rescuePos + EPR_RESCUE_LAST_POS + sizeof(float) * i);
+            Motion1::g92Offsets[i] = EEPROM::getRecoverFloat(rescuePos + EPR_RESCUE_OFFSETS + sizeof(float) * i);
+            Motion1::setAxisHomed(i, true);
+        }
+    } else if (mode & 1) {
+        FOR_ALL_AXES(i) {
+            Motion1::currentPosition[i] = EEPROM::getRecoverFloat(rescuePos + EPR_RESCUE_LAST_RECEIVED + sizeof(float) * i);
+            Motion1::setAxisHomed(i, true);
+        }
+    }
+#endif
+}
+
+int Printer::rescueStartTool() {
+#if HOST_RESCUE
+    if (EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE)) {
+        return static_cast<int>(EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_TOOL));
+    } else {
+        return 0;
+    }
+#else
+    return 0;
+#endif
+}
+
+void Printer::rescueSetup() {
+#if HOST_RESCUE
+    uint8_t mode = EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE);
+    if (mode) {
+        rescueReport();
+        FOR_ALL_AXES(i) { // prevent unwanted moves so we can continue
+            if (i != E_AXIS && Motion1::motors[i]) {
+                Motion1::motors[i]->enable();
+            }
+        }
+        Printer::unsetAllSteppersDisabled();
+        rescueRecover();
+    }
+#endif
+}
+
+bool Printer::isRescueRequired() {
+#if HOST_RESCUE
+    return EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE) != 0;
+#else
+    return false;
+#endif
+}
+
+void Printer::rescueReset() {
+#if HOST_RESCUE
+    uint8_t mode = EEPROM::getRecoverByte(rescuePos + EPR_RESCUE_MODE);
+    if (mode) {
+        EEPROM::setRecoverByte(rescuePos + EPR_RESCUE_MODE, 0);
+    }
+#endif
+}
+
+void Printer::handlePowerLoss() {
+    HeatManager::disableAllHeaters();
+    Com::printErrorFLN(PSTR("POWERLOSS_DETECTED"));
+    if (rescueOn) {
+        rescueStoreReceivedPosition();
+#if POWERLOSS_LEVEL == 1 //z up only
+#endif
+#if POWERLOSS_LEVEL == 2 // full park - we are on a UPC :-)
+        parkSafety();
+#endif
+        Motion1::waitForEndOfMoves();
+        rescueStorePosition();
+        Tool::disableMotors();
+        kill(false);
+        enableFailedModeP(PSTR("Power Loss"));
+    }
+}
+
+void Printer::parkSafety() {
+    if (safetyParked || !rescueOn) {
+        return; // nothing to unpark
+    }
+    rescueStoreReceivedPosition();
+    safetyParked = 1;
+    if (Motion1::pushToMemory()) {
+        Motion1::moveToParkPosition();
+        Motion1::waitForEndOfMoves();
+        rescueStorePosition();
+        safetyParked = 2;
+    }
+    Tool::pauseHeaters();
+    GUI::setStatusP(PSTR("Waiting f. Data..."), GUIStatusLevel::BUSY); // inform user
+}
+void Printer::unparkSafety() {
+    if (!safetyParked) {
+        return; // nothing to unpark
+    }
+    Tool::unpauseHeaters();
+    Tool::waitForTemperatures();
+    bool needsPop = safetyParked > 1;
+    safetyParked = 0;
+    float pos[NUM_AXES];
+    if (needsPop && Motion1::popFromMemory(pos)) {
+        float z = pos[Z_AXIS];
+        pos[Z_AXIS] = IGNORE_COORDINATE;
+        Motion1::moveByOfficial(pos, Motion1::moveFeedrate[X_AXIS], false);
+        FOR_ALL_AXES(i) {
+            pos[i] = IGNORE_COORDINATE;
+        }
+        pos[Z_AXIS] = z;
+        Motion1::moveByOfficial(pos, Motion1::moveFeedrate[Z_AXIS], false);
+    }
+    GUI::popBusy();
+}
+
+void Printer::enableFailedModeP(PGM_P msg) {
+    failedMode = true;
+    GUI::setStatusP(msg, GUIStatusLevel::ERROR);
+    Com::printErrorFLN(msg);
+    Com::printErrorFLN(Com::tM999);
+}
+
+void Printer::enableFailedMode(char* msg) {
+    failedMode = true;
+    GUI::setStatus(msg, GUIStatusLevel::ERROR);
+    Com::printErrorF(Com::tEmpty);
+    Com::print(msg);
+    Com::println();
+    Com::printErrorFLN(Com::tM999);
+}
+
+void Printer::playDefaultSound(DefaultSounds sound) {
+#if NUM_BEEPERS > 0
+    BeeperSourceBase* beeper = beepers[0];
+    switch (sound) {
+    case DefaultSounds::NEXT_PREV:
+        beeper->playTheme(ThemeButtonNextPrev, false);
+        break;
+    case DefaultSounds::OK:
+        beeper->playTheme(ThemeButtonOk, false);
+        break;
+    case DefaultSounds::SUCCESS:
+        beeper->playTheme(ThemeNotifyConfirm, false);
+        break;
+    case DefaultSounds::WARNING:
+        beeper->playTheme(ThemeNotifyWarning, false);
+        break;
+    case DefaultSounds::ERROR:
+        beeper->playTheme(ThemeNotifyError, false);
+        break;
+    case DefaultSounds::RESET:
+        beeper->playTheme(ThemeButtonReset, false);
+        break;
+    }
+#endif
 }

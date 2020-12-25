@@ -27,16 +27,21 @@ void PrinterType::homeAxis(fast8_t axis) {
     Motion1::simpleHome(axis);
 }
 
-bool PrinterType::positionAllowed(float pos[NUM_AXES]) {
+bool PrinterType::positionAllowed(float pos[NUM_AXES], float zOfficial) {
     if (Printer::isNoDestinationCheck()) {
         return true;
     }
     if (Printer::isHoming() || Motion1::endstopMode == EndstopMode::PROBING) {
         return true;
     }
-    for (fast8_t i = 0; i < 3; i++) {
+    // Extra contrain to protect Z condition based on official coordinate system
+    if (zOfficial < Motion1::minPos[Z_AXIS] - 0.01 || zOfficial > Motion1::maxPos[Z_AXIS] + 0.01) {
+        return false;
+    }
+    for (fast8_t i = 0; i <= Z_AXIS; i++) {
         if (Motion1::axesHomed & axisBits[i]) {
-            if (pos[i] < Motion1::minPos[i] || pos[i] > Motion1::maxPos[i]) {
+            if (pos[i] < Motion1::minPosOff[i]
+                || pos[i] > Motion1::maxPosOff[i]) {
                 return false;
             }
         }
@@ -47,12 +52,12 @@ bool PrinterType::positionAllowed(float pos[NUM_AXES]) {
 void PrinterType::closestAllowedPositionWithNewXYOffset(float pos[NUM_AXES], float offX, float offY, float safety) {
     float offsets[3] = { offX, offY, 0 };
     float tOffMin, tOffMax;
-    for (fast8_t i = 0; i < 3; i++) {
+    for (fast8_t i = 0; i <= Z_AXIS; i++) {
         Tool::minMaxOffsetForAxis(i, tOffMin, tOffMax);
 
         float p = pos[i] - offsets[i];
-        float minP = Motion1::minPos[i] + safety + tOffMax - tOffMin;
-        float maxP = Motion1::maxPos[i] - safety + tOffMax - tOffMin;
+        float minP = Motion1::minPos[i] + safety - tOffMax;
+        float maxP = Motion1::maxPos[i] - safety - tOffMin;
         if (p < minP) {
             pos[i] += minP - p;
         } else if (p > maxP) {
@@ -72,13 +77,29 @@ void PrinterType::getBedRectangle(float& xmin, float& xmax, float& ymin, float& 
     ymax = bedRectangle[Y_AXIS][1];
 }
 
+void PrinterType::M360() {
+    Com::config(PSTR("PrinterType:Cartesian"));
+    Com::config(PSTR("BedXMin:"), bedRectangle[X_AXIS][0]);
+    Com::config(PSTR("BedYMin:"), bedRectangle[Y_AXIS][0]);
+    Com::config(PSTR("BedXMax:"), bedRectangle[X_AXIS][1]);
+    Com::config(PSTR("BedYMax:"), bedRectangle[Y_AXIS][1]);
+}
+
 void PrinterType::transform(float pos[NUM_AXES], int32_t motor[NUM_AXES]) {
     motor[X_AXIS] = lroundl((COREXYZ_X_X * pos[X_AXIS] + COREXYZ_X_Y * pos[Y_AXIS] + COREXYZ_X_Z * pos[Z_AXIS]) * Motion1::resolution[X_AXIS]);
     motor[Y_AXIS] = lroundl((COREXYZ_Y_X * pos[X_AXIS] + COREXYZ_Y_Y * pos[Y_AXIS] + COREXYZ_Y_Z * pos[Z_AXIS]) * Motion1::resolution[Y_AXIS]);
     motor[Z_AXIS] = lroundl((COREXYZ_Z_X * pos[X_AXIS] + COREXYZ_Z_Y * pos[Y_AXIS] + COREXYZ_Z_Z * pos[Z_AXIS]) * Motion1::resolution[Z_AXIS]);
+#if defined(COREXYZ_A_X) && defined(COREXYZ_A_Y) && defined(COREXYZ_A_Z) && NUM_AXES > A_AXIS
+    motor[A_AXIS] = lroundl((COREXYZ_A_X * pos[X_AXIS] + COREXYZ_A_Y * pos[Y_AXIS] + COREXYZ_A_Z * pos[Z_AXIS]) * Motion1::resolution[Z_AXIS]);
+    motor[E_AXIS] = lroundl(pos[E_AXIS] * Motion1::resolution[E_AXIS]);
+    for (fast8_t i = B_AXIS; i < NUM_AXES; i++) {
+        motor[i] = lroundl(pos[i] * Motion1::resolution[i]);
+    }
+#else
     for (fast8_t i = E_AXIS; i < NUM_AXES; i++) {
         motor[i] = lroundl(pos[i] * Motion1::resolution[i]);
     }
+#endif
 }
 
 void PrinterType::disableAllowedStepper() {
@@ -92,9 +113,17 @@ void PrinterType::disableAllowedStepper() {
 
 float PrinterType::accelerationForMoveSteps(fast8_t axes) {
     float acceleration = 500.0f;
-    FOR_ALL_AXES(i) {
-        if (axes & axisBits[i]) {
-            acceleration = RMath::min(acceleration, Motion1::maxAcceleration[i]);
+    if (axes & 8) {
+        FOR_ALL_AXES(i) {
+            if (axes & axisBits[i]) {
+                acceleration = RMath::min(acceleration, Motion1::maxTravelAcceleration[i]);
+            }
+        }
+    } else {
+        FOR_ALL_AXES(i) {
+            if (axes & axisBits[i]) {
+                acceleration = RMath::min(acceleration, Motion1::maxAcceleration[i]);
+            }
         }
     }
     return acceleration;
@@ -110,8 +139,8 @@ float PrinterType::feedrateForMoveSteps(fast8_t axes) {
     return feedrate;
 }
 
-void PrinterType::deactivatedTool(fast8_t id) {}
-void PrinterType::activatedTool(fast8_t id) {}
+void PrinterType::deactivatedTool(fast8_t id) { }
+void PrinterType::activatedTool(fast8_t id) { }
 void PrinterType::eepromHandle() {
     EEPROM::handlePrefix(PSTR("Printer"));
     EEPROM::handleFloat(eprStart + 0, PSTR("Bed X Min [mm]"), 2, bedRectangle[X_AXIS][0]);
@@ -131,7 +160,7 @@ void PrinterType::init() {
     eprStart = EEPROM::reserve(EEPROM_SIGNATURE_CARTESIAN, 1, 4 * 4);
 }
 
-void PrinterType::updateDerived() {}
+void PrinterType::updateDerived() { }
 
 void PrinterType::enableMotors(fast8_t axes) {
     if (axes & 7) { // enable x,y,z as a group!
@@ -160,7 +189,7 @@ void PrinterType::transformedToOfficial(float trans[NUM_AXES], float official[NU
     Motion1::transformFromPrinter(
         trans[X_AXIS],
         trans[Y_AXIS],
-        trans[Z_AXIS] - Motion1::zprobeZOffset,
+        trans[Z_AXIS],
         official[X_AXIS],
         official[Y_AXIS],
         official[Z_AXIS]);
@@ -179,7 +208,6 @@ void PrinterType::officialToTransformed(float official[NUM_AXES], float trans[NU
                                 trans[X_AXIS],
                                 trans[Y_AXIS],
                                 trans[Z_AXIS]);
-    trans[Z_AXIS] += Motion1::zprobeZOffset;
     for (fast8_t i = E_AXIS; i < NUM_AXES; i++) {
         trans[i] = official[i];
     }
@@ -189,4 +217,39 @@ bool PrinterType::canSelectTool(fast8_t toolId) {
     return true;
 }
 
+void PrinterType::M290(GCode* com) {
+    InterruptProtectedBlock lock;
+    if (com->hasZ()) {
+        float z = constrain(com->Z, -2, 2);
+        Motion1::totalBabystepZ += z;
+        Motion2::openBabysteps[X_AXIS] += z * COREXYZ_X_Z * Motion1::resolution[X_AXIS];
+        Motion2::openBabysteps[Y_AXIS] += z * COREXYZ_Y_Z * Motion1::resolution[Y_AXIS];
+        Motion2::openBabysteps[Z_AXIS] += z * COREXYZ_Z_Z * Motion1::resolution[Z_AXIS];
+#if defined(COREXYZ_A_X) && defined(COREXYZ_A_Y) && defined(COREXYZ_A_Z) && NUM_AXES > A_AXIS
+        Motion2::openBabysteps[A_AXIS] += z * COREXYZ_A_Z * Motion1::resolution[A_AXIS];
+#endif
+    }
+    lock.unprotect();
+    Com::printFLN(PSTR("BabystepZ:"), Motion1::totalBabystepZ, 4);
+}
+
+bool PrinterType::runMCode(GCode* com) {
+    switch (com->M) {
+    case 290:
+        M290(com);
+        return false;
+    case 360:
+        M360();
+        return false;
+    }
+    return true;
+}
+
+bool PrinterType::runGCode(GCode* com) {
+    return false;
+}
+
+PGM_P PrinterType::getGeometryName() {
+    return PSTR("Core XYZ");
+}
 #endif

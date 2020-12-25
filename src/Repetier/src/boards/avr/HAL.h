@@ -53,12 +53,15 @@
 
 #include <avr/eeprom.h>
 #include <avr/wdt.h>
-/** \brief Prescale factor, timer0 runs at.
 
-All known Arduino boards use 64. This value is needed for the extruder timing. */
-#define TIMER0_PRESCALE 64
+// Which I2C port to use?
+#ifndef WIRE_PORT
+#define WIRE_PORT Wire
+#endif
 
 #define ANALOG_PRESCALER _BV(ADPS0) | _BV(ADPS1) | _BV(ADPS2)
+#define MAX_ANALOG_INPUTS 16
+extern bool analogEnabled[MAX_ANALOG_INPUTS];
 
 #if MOTHERBOARD == 8 || MOTHERBOARD == 88 || MOTHERBOARD == 9 || MOTHERBOARD == 92 || CPU_ARCH != ARCH_AVR
 #define EXTERNALSERIAL
@@ -79,6 +82,7 @@ All known Arduino boards use 64. This value is needed for the extruder timing. *
 #define SERIAL_RX_BUFFER_SIZE 128
 #endif
 #include "Arduino.h"
+#include <Wire.h>
 #if CPU_ARCH == ARCH_AVR
 #include "fastio.h"
 #else
@@ -129,18 +133,7 @@ public:
 #define bit_clear(x, y) x &= ~(1 << y) //cbi(x,y)
 #define bit_set(x, y) x |= (1 << y)    //sbi(x,y)
 
-/** defines the data direction (reading from I2C device) in i2cStart(),i2cRepStart() */
-#define I2C_READ 1
-/** defines the data direction (writing to I2C device) in i2cStart(),i2cRepStart() */
-#define I2C_WRITE 0
-
 #if NONLINEAR_SYSTEM
-// Maximum speed with 100% interrupt utilization is 27000 Hz at 16MHz cpu
-// leave some margin for all the extra transformations. So we keep inside clean timings.
-#define LIMIT_INTERVAL ((F_CPU / 30000) + 1)
-#else
-#define LIMIT_INTERVAL ((F_CPU / 40000) + 1)
-#endif
 
 typedef uint16_t speed_t;
 typedef uint32_t ticks_t;
@@ -263,231 +256,12 @@ public:
 #if FEATURE_WATCHDOG
     static bool wdPinged;
 #endif
+    static uint8_t i2cError;
+
     HAL();
     virtual ~HAL();
-    static inline void hwSetup(void) {}
-    // return val*val
-    static uint16_t integerSqrt(uint32_t a);
-    /** \brief Optimized division
+    static inline void hwSetup(void) { }
 
-    Normally the C compiler will compute a long/long division, which takes ~670 Ticks.
-    This version is optimized for a 16 bit dividend and recognizes the special cases
-    of a 24 bit and 16 bit dividend, which often, but not always occur in updating the
-    interval.
-    */
-    static inline int32_t Div4U2U(uint32_t a, uint16_t b) {
-#if CPU_ARCH == ARCH_AVR
-        // r14/r15 remainder
-        // r16 counter
-        __asm__ __volatile__(
-            "clr r14 \n\t"
-            "sub r15,r15 \n\t"
-            "tst %D0 \n\t"
-            "brne do32%= \n\t"
-            "tst %C0 \n\t"
-            "breq donot24%= \n\t"
-            "rjmp do24%= \n\t"
-            "donot24%=:"
-            "ldi r16,17 \n\t" // 16 Bit divide
-            "d16u_1%=:"
-            "rol %A0 \n\t"
-            "rol %B0 \n\t"
-            "dec r16 \n\t"
-            "brne	d16u_2%= \n\t"
-            "rjmp end%= \n\t"
-            "d16u_2%=:"
-            "rol r14 \n\t"
-            "rol r15 \n\t"
-            "sub r14,%A2 \n\t"
-            "sbc r15,%B2 \n\t"
-            "brcc	d16u_3%= \n\t"
-            "add r14,%A2 \n\t"
-            "adc r15,%B2 \n\t"
-            "clc \n\t"
-            "rjmp d16u_1%= \n\t"
-            "d16u_3%=:"
-            "sec \n\t"
-            "rjmp d16u_1%= \n\t"
-            "do32%=:" // divide full 32 bit
-            "rjmp do32B%= \n\t"
-            "do24%=:" // divide 24 bit
-
-            "ldi r16,25 \n\t" // 24 Bit divide
-            "d24u_1%=:"
-            "rol %A0 \n\t"
-            "rol %B0 \n\t"
-            "rol %C0 \n\t"
-            "dec r16 \n\t"
-            "brne	d24u_2%= \n\t"
-            "rjmp end%= \n\t"
-            "d24u_2%=:"
-            "rol r14 \n\t"
-            "rol r15 \n\t"
-            "sub r14,%A2 \n\t"
-            "sbc r15,%B2 \n\t"
-            "brcc	d24u_3%= \n\t"
-            "add r14,%A2 \n\t"
-            "adc r15,%B2 \n\t"
-            "clc \n\t"
-            "rjmp d24u_1%= \n\t"
-            "d24u_3%=:"
-            "sec \n\t"
-            "rjmp d24u_1%= \n\t"
-
-            "do32B%=:" // divide full 32 bit
-
-            "ldi r16,33 \n\t" // 32 Bit divide
-            "d32u_1%=:"
-            "rol %A0 \n\t"
-            "rol %B0 \n\t"
-            "rol %C0 \n\t"
-            "rol %D0 \n\t"
-            "dec r16 \n\t"
-            "brne	d32u_2%= \n\t"
-            "rjmp end%= \n\t"
-            "d32u_2%=:"
-            "rol r14 \n\t"
-            "rol r15 \n\t"
-            "sub r14,%A2 \n\t"
-            "sbc r15,%B2 \n\t"
-            "brcc	d32u_3%= \n\t"
-            "add r14,%A2 \n\t"
-            "adc r15,%B2 \n\t"
-            "clc \n\t"
-            "rjmp d32u_1%= \n\t"
-            "d32u_3%=:"
-            "sec \n\t"
-            "rjmp d32u_1%= \n\t"
-
-            "end%=:" // end
-            : "=&r"(a)
-            : "0"(a), "r"(b)
-            : "r14", "r15", "r16");
-        return a;
-#else
-        return a / b;
-#endif
-    }
-    static inline unsigned long U16SquaredToU32(unsigned int val) {
-        long res;
-        __asm__ __volatile__( // 15 Ticks
-            "mul %A1,%A1 \n\t"
-            "movw %A0,r0 \n\t"
-            "mul %B1,%B1 \n\t"
-            "movw %C0,r0 \n\t"
-            "mul %A1,%B1 \n\t"
-            "clr %A1 \n\t"
-            "add %B0,r0 \n\t"
-            "adc %C0,r1 \n\t"
-            "adc %D0,%A1 \n\t"
-            "add %B0,r0 \n\t"
-            "adc %C0,r1 \n\t"
-            "adc %D0,%A1 \n\t"
-            "clr r1 \n\t"
-            : "=&r"(res), "=r"(val)
-            : "1"(val));
-        return res;
-    }
-    static inline unsigned int ComputeV(long timer, long accel) {
-#if CPU_ARCH == ARCH_AVR
-        unsigned int res;
-        // 38 Ticks
-        __asm__ __volatile__( // 0 = res, 1 = timer, 2 = accel %D2=0 ,%A1 are unused is free
-            // Result LSB first: %A0, %B0, %A1
-            "mul %B1,%A2 \n\t"
-            "mov %A0,r1 \n\t"
-            "mul %B1,%C2 \n\t"
-            "mov %B0,r0 \n\t"
-            "mov %A1,r1 \n\t"
-            "mul %B1,%B2 \n\t"
-            "add %A0,r0 \n\t"
-            "adc %B0,r1 \n\t"
-            "adc %A1,%D2 \n\t"
-            "mul %C1,%A2 \n\t"
-            "add %A0,r0 \n\t"
-            "adc %B0,r1 \n\t"
-            "adc %A1,%D2 \n\t"
-            "mul %C1,%B2 \n\t"
-            "add %B0,r0 \n\t"
-            "adc %A1,r1 \n\t"
-            "mul %D1,%A2 \n\t"
-            "add %B0,r0 \n\t"
-            "adc %A1,r1 \n\t"
-            "mul %C1,%C2 \n\t"
-            "add %A1,r0 \n\t"
-            "mul %D1,%B2 \n\t"
-            "add %A1,r0 \n\t"
-            "lsr %A1 \n\t"
-            "ror %B0 \n\t"
-            "ror %A0 \n\t"
-            "lsr %A1 \n\t"
-            "ror %B0 \n\t"
-            "ror %A0 \n\t"
-            "clr r1 \n\t"
-            : "=&r"(res), "=r"(timer), "=r"(accel)
-            : "1"(timer), "2"(accel)
-            :);
-        // unsigned int v = ((timer>>8)*cur->accel)>>10;
-        return res;
-#else
-        return ((timer >> 8) * accel) >> 10;
-#endif
-    }
-    // Multiply two 16 bit values and return 32 bit result
-    static inline uint32_t mulu16xu16to32(unsigned int a, unsigned int b) {
-        uint32_t res;
-        // 18 Ticks = 1.125 us
-        __asm__ __volatile__( // 0 = res, 1 = timer, 2 = accel %D2=0 ,%A1 are unused is free
-            // Result LSB first: %A0, %B0, %A1
-            "clr r18 \n\t"
-            "mul %B2,%B1 \n\t" // mul hig bytes
-            "movw %C0,r0 \n\t"
-            "mul %A1,%A2 \n\t" // mul low bytes
-            "movw %A0,r0 \n\t"
-            "mul %A1,%B2 \n\t"
-            "add %B0,r0 \n\t"
-            "adc %C0,r1 \n\t"
-            "adc %D0,r18 \n\t"
-            "mul %B1,%A2 \n\t"
-            "add %B0,r0 \n\t"
-            "adc %C0,r1 \n\t"
-            "adc %D0,r18 \n\t"
-            "clr r1 \n\t"
-            : "=&r"(res), "=r"(a), "=r"(b)
-            : "1"(a), "2"(b)
-            : "r18");
-        // return (long)a*b;
-        return res;
-    }
-    // Multiply two 16 bit values and return 32 bit result
-    static inline unsigned int mulu6xu16shift16(unsigned int a, unsigned int b) {
-#if CPU_ARCH == ARCH_AVR
-        unsigned int res;
-        // 18 Ticks = 1.125 us
-        __asm__ __volatile__( // 0 = res, 1 = timer, 2 = accel %D2=0 ,%A1 are unused is free
-            // Result LSB first: %A0, %B0, %A1
-            "clr r18 \n\t"
-            "mul %B2,%B1 \n\t" // mul hig bytes
-            "movw %A0,r0 \n\t"
-            "mul %A1,%A2 \n\t" // mul low bytes
-            "mov r19,r1 \n\t"
-            "mul %A1,%B2 \n\t"
-            "add r19,r0 \n\t"
-            "adc %A0,r1 \n\t"
-            "adc %B0,r18 \n\t"
-            "mul %B1,%A2 \n\t"
-            "add r19,r0 \n\t"
-            "adc %A0,r1 \n\t"
-            "adc %B0,r18 \n\t"
-            "clr r1 \n\t"
-            : "=&r"(res), "=r"(a), "=r"(b)
-            : "1"(a), "2"(b)
-            : "r18", "r19");
-        return res;
-#else
-        return ((int32_t)a * b) >> 16;
-#endif
-    }
     static inline void digitalWrite(uint8_t pin, uint8_t value) {
         ::digitalWrite(pin, value);
     }
@@ -497,18 +271,21 @@ public:
     static inline void pinMode(uint8_t pin, uint8_t mode) {
         ::pinMode(pin, mode);
     }
-    static int32_t CPUDivU2(unsigned int divisor);
     static inline void delayMicroseconds(unsigned int delayUs) {
         ::delayMicroseconds(delayUs);
     }
     static inline void delayMilliseconds(unsigned int delayMs) {
         ::delay(delayMs);
     }
-    static inline void tone(uint8_t pin, int duration) {
-        ::tone(pin, duration);
+    static inline void tone(int duration) {
+#if BEEPER_PIN > -1
+        ::tone(BEEPER_PIN, duration);
+#endif
     }
-    static inline void noTone(uint8_t pin) {
-        ::noTone(pin);
+    static inline void noTone() {
+#if BEEPER_PIN > -1
+        ::noTone(BEEPER_PIN);
+#endif
     }
     static inline void eprSetByte(unsigned int pos, uint8_t value) {
         eeprom_write_byte((unsigned char*)(pos), value);
@@ -677,12 +454,12 @@ public:
 
     static void i2cSetClockspeed(uint32_t clockSpeedHz);
     static void i2cInit(uint32_t clockSpeedHz);
-    static unsigned char i2cStart(uint8_t address);
-    static void i2cStartWait(uint8_t address);
+    static void i2cStartRead(uint8_t address7bit, uint8_t bytes);
+    // static void i2cStart(uint8_t address7bit);
+    static void i2cStartAddr(uint8_t address7bit, unsigned int pos, uint8_t readBytes);
     static void i2cStop(void);
     static void i2cWrite(uint8_t data);
-    static uint8_t i2cReadAck(void);
-    static uint8_t i2cReadNak(void);
+    static int i2cRead(void);
 
     // Watchdog support
 
@@ -702,14 +479,12 @@ public:
         wdPinged = true;
 #endif
     };
-    inline static float maxExtruderTimerFrequency() {
-        return (float)F_CPU / TIMER0_PRESCALE;
-    }
 #if NUM_SERVOS > 0
     static unsigned int servoTimings[4];
     static void servoMicroseconds(uint8_t servo, int ms, uint16_t autoOff);
 #endif
     static void analogStart();
+    static void reportHALDebug() { }
 
 protected:
 private:

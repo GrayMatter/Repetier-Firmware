@@ -40,30 +40,41 @@
 #define NUM_TOOLS 2
 #define NUM_SERVOS 0
 #define NUM_EXTRUDER 2
-#define MOTHERBOARD 402 // RADDS
+#define MOTHERBOARD MOTHERBOARD_RADDS
 #define EEPROM_MODE 1
 #define RFSERIAL Serial
 #define BLUETOOTH_SERIAL 101
 #define BLUETOOTH_BAUD 115200
 #define WAITING_IDENTIFIER "wait"
 #define JSON_OUTPUT 1
-#define FEATURE_WATCHDOG 0
-#define FEATURE_Z_PROBE 0
+#define FEATURE_WATCHDOG 1
 #define FEATURE_RETRACTION 1
-#define DISTORTION_CORRECTION 0
-#define USE_ADVANCE 1
 #define NUM_AXES 4                   // X,Y,Z and E for extruder A,B,C would be 5,6,7
 #define STEPPER_FREQUENCY 100000     // Maximum stepper frequency.
 #define PREPARE_FREQUENCY 1000       // Update frequency for new blocks. Must be higher then PREPARE_FREQUENCY.
 #define BLOCK_FREQUENCY 500          // Number of blocks with constant stepper rate per second.
 #define VELOCITY_PROFILE 2           // 0 = linear, 1 = cubic, 2 = quintic velocity shape
-#define Z_SPEED 10                   // Z positioning speed
+#define SLOW_DIRECTION_CHANGE 1      // can be reason for lost steps on slow drivers
+#define SMALL_SEGMENT_SIZE 0.4       // Smaller segments reduce join speed to prevent vibrations causing lost steps
+#define Z_SPEED 100                  // Z positioning speed
 #define XY_SPEED 100                 // XY positioning speed for normal operations
 #define MAX_ROOM_TEMPERATURE 25      // No heating below this temperature!
 #define TEMPERATURE_CONTROL_RANGE 20 // Start with controlling if temperature is +/- this value to target temperature
+#define HOST_RESCUE 1                // Enable host rescue help system
+//#define DEBUG_RESCUE                 // Uncomment to add power loss entry in debug menu while printing
+#define POWERLOSS_LEVEL 2     // How much time do we have on powerloss, 0 = no move, 1 = short just raise Z, 2 = long full park move
+#define POWERLOSS_UP 5        // How much to move up if mode 1 is active
+#define Z_PROBE_TYPE 1        // 0 = no z probe, 1 = default z probe, 2 = Nozzle as probe
+#define Z_PROBE_BORDER 2      // Safety border to ensure position is allowed
+#define Z_PROBE_TEMPERATURE 0 // Temperature for type 2
+// Set 1 if you want to replace the default themes and define them in configuration_io.h
+#define CUSTOM_DEFAULT_THEMES 0
 
 // 0 = Cartesian, 1 = CoreXYZ, 2 = delta
-#define PRINTER_TYPE 2
+#define PRINTER_TYPE PRINTER_TYPE_DELTA
+// steps to include as babysteps per 1/BLOCK_FREQUENCY seconds. Must be lower then STEPPER_FREQUENCY/BLOCK_FREQUENCY and be low enough to not loose steps.
+#define BABYSTEPS_PER_BLOCK \
+    { 1, 1, 1 }
 /* Ratios for core xyz. First index denotes motor and second axis.
 For each motor you can set the ratio of x,y,z position that adds
 to the position. 0 = no contribution. */
@@ -128,6 +139,11 @@ to the position. 0 = no contribution. */
 #define DISABLE_Y 0
 #define DISABLE_Z 0
 
+#define FEATURE_AXISCOMP 1
+#define AXISCOMP_TANXY 0
+#define AXISCOMP_TANYZ 0
+#define AXISCOMP_TANXZ 0
+
 // Next 7 lines are required to make the following work, do not change!
 #include "boards/pins.h"
 #undef IO_TARGET
@@ -177,6 +193,44 @@ CONFIG_VARIABLE_EQ(EndstopDriver, *ZProbe, ZPROBE_ADDRESS)
 #define NUM_MOTORS 3
 #define MOTORS \
     { &XMotor, &YMotor, &ZMotor }
+#define MOTOR_NAMES \
+    { PSTR("X"), PSTR("Y"), PSTR("Z") }
+// Define beeper list
+#if BEEPER_PIN > -1
+#define NUM_BEEPERS 1
+#define BEEPER_LIST \
+    { &MainBeeper }
+#else
+#define NUM_BEEPERS 0
+#define BEEPER_LIST \
+    { }
+#endif
+
+// Some common settings for trinamic driver settings
+/**
+ Chopper timing is an array with
+ {toff, hend, hstrt}
+ See TMC datasheets for more details. There are some predefined values to get you started:
+ CHOPPER_TIMING_DEFAULT_12V = { 3, -1, 1 }
+ CHOPPER_TIMING_DEFAULT_19V = { 4, 1, 1 }
+ CHOPPER_TIMING_DEFAULT_24V = { 4, 2, 1 }
+ CHOPPER_TIMING_DEFAULT_36V = { 5, 2, 4 }
+ CHOPPER_TIMING_PRUSAMK3_24V = { 3, -2, 6 }
+
+*/
+#define TMC_CHOPPER_TIMING CHOPPER_TIMING_DEFAULT_12V
+// true = interpolate to 256 microsteps for smoother motion
+#define TMC_INTERPOLATE true
+// Current used when motor stands still
+#define TMC_HOLD_MULTIPLIER 0.5
+// Reduce current on over temperature warnings by x milli ampere, 0 = disable
+#define TMC_CURRENT_STEP_DOWN 50
+// Define which data should be stored to eeprom
+#define STORE_MOTOR_MICROSTEPPING 1
+#define STORE_MOTOR_CURRENT 1
+#define STORE_MOTOR_HYBRID_TRESHOLD 1
+#define STORE_MOTOR_STEALTH 1
+#define STORE_MOTOR_STALL_SENSITIVITY 1
 
 #define X_MAX_LENGTH 210
 #define Y_MAX_LENGTH 210
@@ -185,7 +239,7 @@ CONFIG_VARIABLE_EQ(EndstopDriver, *ZProbe, ZPROBE_ADDRESS)
 #define Y_MIN_POS -210
 #define Z_MIN_POS 0
 // Park position used when pausing from firmware side
-#if PRINTER_TYPE == 2
+#if PRINTER_TYPE == PRINTER_TYPE_DELTA
 #define PARK_POSITION_X (0)
 #define PARK_POSITION_Y (70)
 #else
@@ -273,28 +327,6 @@ CONFIG_VARIABLE_EQ(EndstopDriver, *ZProbe, ZPROBE_ADDRESS)
 #define MIN_EXTRUDER_TEMP 150
 #define MILLISECONDS_PREHEAT_TIME 30000
 
-// ##                              CNC configuration                                       ##
-
-/*
-If the firmware is in CNC mode, it can control a mill with M3/M4/M5. It works
-similar to laser mode, but mill keeps enabled during G0 moves and it allows
-setting rpm (only with event extension that supports this) and milling direction.
-It also can add a delay to wait for spindle to run on full speed.
-*/
-
-#define SUPPORT_CNC 0
-#define CNC_WAIT_ON_ENABLE 300
-#define CNC_WAIT_ON_DISABLE 0
-#define CNC_ENABLE_PIN -1
-#define CNC_ENABLE_WITH 1
-#define CNC_DIRECTION_PIN -1
-#define CNC_DIRECTION_CW 1
-#define CNC_PWM_MAX 255
-#define CNC_RPM_MAX 8000
-#define CNC_SAFE_Z 150
-
-#define DEFAULT_PRINTER_MODE 0
-
 // ################ Endstop/homing configuration #####################
 
 #define DOOR_PIN -1
@@ -333,19 +365,6 @@ It also can add a delay to wait for spindle to run on full speed.
 
 #define PREVENT_Z_DISABLE_ON_STEPPER_TIMEOUT 0
 
-#define DISTORTION_CORRECTION_POINTS 5
-#define DISTORTION_LIMIT_TO 2
-#define DISTORTION_CORRECTION_R 100
-#define DISTORTION_PERMANENT 1
-#define DISTORTION_UPDATE_FREQUENCY 15
-#define DISTORTION_START_DEGRADE 5
-#define DISTORTION_END_HEIGHT 10
-#define DISTORTION_EXTRAPOLATE_CORNERS 0
-#define DISTORTION_XMIN 10
-#define DISTORTION_YMIN 10
-#define DISTORTION_XMAX 225
-#define DISTORTION_YMAX 230
-
 // ##########################################################################################
 // ##                           Movement settings                                          ##
 // ##########################################################################################
@@ -367,17 +386,10 @@ It also can add a delay to wait for spindle to run on full speed.
 #define Y_BACKLASH 0
 #define Z_BACKLASH 0
 #define RAMP_ACCELERATION 1
-#define STEPPER_HIGH_DELAY 0
-#define DIRECTION_DELAY 0
-#define INTERPOLATE_ACCELERATION_WITH_Z 1
-#define ACCELERATION_FACTOR_TOP 75
 #define MAX_JERK 5
 #define MAX_ZJERK 0.3
 #define PRINTLINE_CACHE_SIZE 32
-#define MOVE_CACHE_LOW 10
 #define LOW_TICKS_PER_MOVE 250000
-#define EXTRUDER_SWITCH_XY_SPEED 100
-// #define FEATURE_DITTO_PRINTING 0
 
 // ################# Misc. settings ##################
 
@@ -393,10 +405,11 @@ It also can add a delay to wait for spindle to run on full speed.
 
 // #################### Z-Probing #####################
 
+#define Z_PROBE_COATING 0
 #define Z_PROBE_Z_OFFSET 0.05
 #define Z_PROBE_Z_OFFSET_MODE 1
 #define UI_BED_COATING 1
-#define EXTRUDER_IS_Z_PROBE 1
+#define EXTRUDER_IS_Z_PROBE 0
 #define Z_PROBE_DISABLE_HEATERS 1
 #define Z_PROBE_BED_DISTANCE 3
 #define Z_PROBE_PIN ORIG_Z_MIN_PIN
@@ -418,29 +431,21 @@ It also can add a delay to wait for spindle to run on full speed.
 #define Z_PROBE_MIN_TEMPERATURE 150
 #define FEATURE_AUTOLEVEL 1
 #define FEATURE_SOFTWARE_LEVELING 0
-#define Z_PROBE_X1 60
-#define Z_PROBE_Y1 130
-#define Z_PROBE_X2 137
-#define Z_PROBE_Y2 45
-#define Z_PROBE_X3 137
-#define Z_PROBE_Y3 210
-#define BED_LEVELING_METHOD 2
-#define BED_CORRECTION_METHOD 0
-#define BED_LEVELING_GRID_SIZE 5
-#define BED_LEVELING_REPETITIONS 5
-#define BED_MOTOR_1_X 55
-#define BED_MOTOR_1_Y 130
-#define BED_MOTOR_2_X 137
-#define BED_MOTOR_2_Y 45
-#define BED_MOTOR_3_X 137
-#define BED_MOTOR_3_Y 210
-#define BENDING_CORRECTION_A 0
-#define BENDING_CORRECTION_B 0
-#define BENDING_CORRECTION_C 0
-#define FEATURE_AXISCOMP 0
-#define AXISCOMP_TANXY 0
-#define AXISCOMP_TANYZ 0
-#define AXISCOMP_TANXZ 0
+
+// Leveling method
+// 0 = none, 3 = 3 points, 1 = grid, 2 = 4 point symmetric
+#define LEVELING_METHOD 2
+#define L_P1_X 60
+#define L_P1_Y 130
+#define L_P2_X 137
+#define L_P2_Y 45
+#define L_P3_X 137
+#define L_P3_Y 210
+#define MAX_GRID_SIZE 5                   // Maximum grid size allocation in memory, imported grid can be smaller
+#define ENABLE_BUMP_CORRECTION 1          // CPU intensive, so only activate if required
+#define BUMP_CORRECTION_START_DEGRADE 0.5 // Until this height we correct 100%
+#define BUMP_CORRECTION_END_HEIGHT 2      // From this height on we do no correction
+#define BUMP_LIMIT_TO 0                   // Maximum allowed correction up/down, <= 0 off.
 
 #ifndef SDSUPPORT // Some boards have sd support on board. These define the values already in pins.h
 #define SDSUPPORT 1
@@ -458,18 +463,6 @@ It also can add a delay to wait for spindle to run on full speed.
 #define FEATURE_FAN2_CONTROL 0
 #define FEATURE_CONTROLLER 0 // 11
 #define ADC_KEYPAD_PIN -1
-#define LANGUAGE_EN_ACTIVE 1
-#define LANGUAGE_DE_ACTIVE 1
-#define LANGUAGE_NL_ACTIVE 1
-#define LANGUAGE_PT_ACTIVE 1
-#define LANGUAGE_IT_ACTIVE 1
-#define LANGUAGE_ES_ACTIVE 1
-#define LANGUAGE_FI_ACTIVE 1
-#define LANGUAGE_SE_ACTIVE 1
-#define LANGUAGE_FR_ACTIVE 1
-#define LANGUAGE_CZ_ACTIVE 1
-#define LANGUAGE_PL_ACTIVE 1
-#define LANGUAGE_TR_ACTIVE 1
 #define UI_PRINTER_NAME "FELIX Pro 1"
 #define UI_PRINTER_COMPANY "FELIXprinters"
 #define UI_PAGES_DURATION 4000
@@ -497,12 +490,6 @@ Values must be in range 1..255
 */
 #define BEEPER_SHORT_SEQUENCE 2, 2
 #define BEEPER_LONG_SEQUENCE 8, 8
-#define UI_SET_MIN_HEATED_BED_TEMP 30
-#define UI_SET_MAX_HEATED_BED_TEMP 120
-#define UI_SET_MIN_EXTRUDER_TEMP 80
-#define UI_SET_MAX_EXTRUDER_TEMP 275
-#define UI_SET_EXTRUDER_FEEDRATE 5
-#define UI_SET_EXTRUDER_RETRACT_DISTANCE 3
 
 #define NUM_MOTOR_DRIVERS 0
 //#define MOTOR_DRIVER_1(var) StepperDriver<51, 53, 49, 0, 0> var(3382, 0.2)

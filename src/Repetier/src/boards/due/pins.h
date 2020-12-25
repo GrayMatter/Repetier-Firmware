@@ -93,9 +93,9 @@
 #define EEPROM_SERIAL_ADDR 0x50  // 7 bit i2c address (without R/W bit)
 #define EEPROM_PAGE_SIZE 64      // page write buffer size
 #define EEPROM_PAGE_WRITE_TIME 7 // page write time in milliseconds (docs say 5ms but that is too short)
-// TWI_MMR_IADRSZ_1_BYTE for 1 byte, or TWI_MMR_IADRSZ_2_BYTE for 2 byte
-#define EEPROM_ADDRSZ_BYTES TWI_MMR_IADRSZ_2_BYTE
+#ifndef EEPROM_AVAILABLE
 #define EEPROM_AVAILABLE EEPROM_I2C
+#endif
 #endif
 
 // RADDS Board
@@ -104,19 +104,23 @@
 #include "boards/radds.h"
 #endif
 
-#if MOTHERBOARD == 403 || MOTHERBOARD == 404
+#if MOTHERBOARD == MOTHERBOARD_RAMPS_FD_INVERTED_HEATER || MOTHERBOARD == MOTHERBOARD_RAMPS_FD
 #include "boards/ramps-fd.h"
 #endif
 
-#if MOTHERBOARD == 405
+#if MOTHERBOARD == MOTHERBOARD_FELIX
 #include "boards/felix.h"
 #endif
 
-#if MOTHERBOARD == 406
+#if MOTHERBOARD == MOTHERBOARD_BAM_AND_DICE
 #include "boards/bam_and_dice.h"
 #endif
 
-#if MOTHERBOARD == 409
+#if MOTHERBOARD == 408 || MOTHERBOARD == 413
+#include "boards/smart_ramps.h"
+#endif
+
+#if MOTHERBOARD == MOTHERBOARD_ULTRATRONICS
 #include "boards/ultratronics.h"
 #endif
 
@@ -124,19 +128,27 @@
 #include "boards/due3dom.h"
 #endif
 
-#if MOTHERBOARD == 412
+#if MOTHERBOARD == MOTHERBOARD_STACKER_3D_SUPERBOARD
 #include "boards/stacker_3d_superboard.h"
 #endif
 
-#if MOTHERBOARD == 414
+#if MOTHERBOARD == MOTHERBOARD_RURAMPS4D
 #include "boards/ruramps4d.h"
 #endif
 
-#if MOTHERBOARD == 500 || MOTHERBOARD == 501 || MOTHERBOARD == 502
+#if MOTHERBOARD == MOTHERBOARD_SHASTA
+#include "boards/shasta.h"
+#endif
+
+#if MOTHERBOARD == MOTHERBOARD_IKS3D
+#include "boards/iks3d.h"
+#endif
+
+#if MOTHERBOARD == MOTHERBOARD_ALLIGATOR_REV1 || MOTHERBOARD == MOTHERBOARD_ALLIGATOR_REV2 || MOTHERBOARD == MOTHERBOARD_ALLIGATOR_REV3
 #include "boards/alligator.h"
 #endif
 
-#if MOTHERBOARD == 998
+#if MOTHERBOARD == MOTHERBOARD_USER_DEFINED_DUE
 #define KNOWN_BOARD
 #include "../extra/userpins.h"
 #endif
@@ -145,22 +157,8 @@
 #define SDSSORIG -1
 #endif
 
-#ifndef STEPPER_CURRENT_CONTROL // Set default stepper current control if not set yet.
-#define STEPPER_CURRENT_CONTROL CURRENT_CONTROL_MANUAL
-#endif
-
 #ifndef FAN_BOARD_PIN
 #define FAN_BOARD_PIN -1
-#endif
-
-#if NUM_EXTRUDER < 2
-#undef E1_PINS
-#define E1_PINS
-#endif
-
-#if NUM_EXTRUDER < 3
-#undef E2_PINS
-#define E2_PINS
 #endif
 
 #ifndef HEATER_PINS_INVERTED
@@ -262,6 +260,10 @@
 #define ORIG_SDCARDDETECT -1
 #endif
 #define SDCARDDETECT ORIG_SDCARDDETECT
+
+#ifndef BEEPER_PIN
+#define BEEPER_PIN -1
+#endif
 
 #define SENSITIVE_PINS \
     { \

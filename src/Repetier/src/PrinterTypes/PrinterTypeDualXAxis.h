@@ -22,6 +22,10 @@
 
 #if PRINTER_TYPE == PRINTER_TYPE_DUAL_X
 
+#if NUM_AXES < 5
+#error Dual X requires A axis for second X axis. So minimum NUM_AXES required is 5!
+#endif
+
 class PrinterType {
     static bool leftParked, rightParked;
     static uint8_t lazyMode;
@@ -29,8 +33,10 @@ class PrinterType {
     static float endPos[2], targetReal;
     static bool dontChangeCoords;
     static float bedRectangle[2][2];
+    static float bedCenter;
     static uint16_t eeprom; // start position eeprom
     static fast8_t activeAxis;
+    static bool xMoved;
 
 public:
     // Are subdivisions required due to nonlinear kinematics
@@ -45,7 +51,7 @@ public:
     static bool positionOnBed(float pos[2]);
     static void getBedRectangle(float& xmin, float& xmax, float& ymin, float& ymax);
 
-    static bool positionAllowed(float pos[NUM_AXES]);
+    static bool positionAllowed(float pos[NUM_AXES], float zOfficial);
     static void disableAllowedStepper();
     /** During probing or homing a move in steps might be needed.
      * This returns the acceleration to use. */
@@ -53,6 +59,7 @@ public:
     static float feedrateForMoveSteps(fast8_t axes);
     static void deactivatedTool(fast8_t id);
     static void activatedTool(fast8_t id);
+    static void toolchangeFinished();
     static void eepromHandle();
     static void restoreFromConfiguration();
     static void init();
@@ -68,5 +75,12 @@ public:
     static fast8_t axisForTool(fast8_t toolId);
     static fast8_t getActiveAxis() { return activeAxis; }
     static bool canSelectTool(fast8_t toolId);
+    static void M290(GCode* com);
+    static void M360();
+    static bool runMCode(GCode* com);
+    static bool runGCode(GCode* com);
+    static PGM_P getGeometryName();
 };
+#define MACHINE_TYPE "Dual X"
+
 #endif

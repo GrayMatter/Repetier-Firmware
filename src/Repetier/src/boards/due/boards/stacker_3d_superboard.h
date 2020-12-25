@@ -17,6 +17,22 @@
 */
 
 // STACKER 3D Superboard
+
+/*
+Board Pin Name  Firmware Name
+HE1             HEATER_0
+HE2             HEATER_2
+HE3             HEATER_3
+HE4             HEATER_4
+HE5             HEATER_5
+HE6             HEATER_6
+HE7             HEATER_7
+HE8             HEATER_8 / ORIG_FAN2_PIN
+FAN             ORIG_FAN_PIN
+H-BED           HEATER_1
+
+*/
+
 #if MOTHERBOARD == 412
 #ifndef __SAM3X8E__
 #error Oops!  Make sure you have 'Arduino Due' selected from the 'Tools -> Boards' menu.
@@ -66,14 +82,14 @@ AD13 CH13
 AD14 CH14
 AD15 CH15
 */
-#define HEATER_0_PIN 7
+#define HEATER_0_PIN 7 ///< PWM channel 6
 #define TEMP_0_PIN 7
 // These pins are for bed !
 #define HEATER_1_PIN 98
 #define TEMP_1_PIN 6
-#define HEATER_2_PIN 8
+#define HEATER_2_PIN 8 ///< PWM channel 5
 #define TEMP_2_PIN 5
-#define HEATER_3_PIN 9
+#define HEATER_3_PIN 9 ///< PWM Channel 4
 #define TEMP_3_PIN 4
 // D7
 #define HEATER_4_PIN 11
@@ -134,6 +150,7 @@ AD15 CH15
 #define SDA_PIN 20
 // 21 or 71
 #define SCL_PIN 21
+#define BEEPER_PIN -1
 
 // Display controller
 
@@ -143,8 +160,8 @@ AD15 CH15
 #define UI_DISPLAY_ENABLE_PIN 27
 #define UI_DISPLAY_D4_PIN 25
 #define UI_DISPLAY_D5_PIN -1
-#define UI_ENCODER_A 33
-#define UI_ENCODER_B 35
+#define UI_ENCODER_A 35
+#define UI_ENCODER_B 33
 #define UI_ENCODER_CLICK 37
 #define UI_RESET_PIN -1
 #define UI_BACK_PIN -1
@@ -161,8 +178,12 @@ AD15 CH15
 #define EEPROM_SERIAL_ADDR 0x50  // 7 bit i2c address (without R/W bit)
 #define EEPROM_PAGE_SIZE 64      // page write buffer size
 #define EEPROM_PAGE_WRITE_TIME 7 // page write time in milliseconds (docs say 5ms but that is too short)
-// specify size of eeprom address register
-// TWI_MMR_IADRSZ_1_BYTE for 1 byte, or TWI_MMR_IADRSZ_2_BYTE for 2 byte
-#define EEPROM_ADDRSZ_BYTES TWI_MMR_IADRSZ_2_BYTE
+#ifndef EEPROM_AVAILABLE
 #define EEPROM_AVAILABLE EEPROM_I2C
+#endif
+
+#ifndef MAX_WIRE_INTERFACES
+#define MAX_WIRE_INTERFACES 1
+#endif
+
 #endif

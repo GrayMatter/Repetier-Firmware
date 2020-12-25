@@ -24,6 +24,8 @@ fast8_t Motion2::nextActId;
 Motion2Buffer* Motion2::act;
 Motion1Buffer* Motion2::actM1;
 int32_t Motion2::lastMotorPos[2][NUM_AXES];
+volatile int16_t Motion2::openBabysteps[NUM_AXES];
+const int16_t Motion2::babystepsPerSegment[NUM_AXES] = BABYSTEPS_PER_BLOCK;
 fast8_t Motion2::lastMotorIdx; // index to last pos
 VelocityProfile* Motion2::velocityProfile = nullptr;
 uint8_t Motion2::velocityProfileIndex;
@@ -40,15 +42,18 @@ void Motion2::init() {
     FOR_ALL_AXES(i) {
         lastMotorPos[0][i] = 0;
         lastMotorPos[1][i] = 0;
+        openBabysteps[i] = 0;
     }
 }
 // Timer gets called at PREPARE_FREQUENCY so it has enough time to
 // prefill data structures required by stepper interrupt. Each segment planned
-// is for a 2000 / PREPARE_FREQUENCY long period of constant speed. We try to
+// is for a 1 / BLOCK_FREQUENCY long period of constant speed. We try to
 // precompute up to 16 such tiny buffers and with the double frequency We
 // should be on the safe side of never getting an underflow.
-void Motion2::timer() {
+__attribute__((optimize("unroll-loops"))) void Motion2::timer() {
+#ifdef DEBUG_REVERSAL
     static float lastL = 0;
+#endif
     // First check if can push anything into next level
     Motion3Buffer* m3 = Motion3::tryReserve();
     if (m3 == nullptr) { // no free space, do nothing until free
@@ -56,7 +61,42 @@ void Motion2::timer() {
     }
     // Check if we need to start a new M1 buffer
     if (actM1 == nullptr) {
-        if (length == NUM_MOTION2_BUFFER || Motion1::lengthUnprocessed == 0) { // buffers full
+        if (Motion1::lengthUnprocessed == 0) { // no moves stored
+            if (length < NUM_MOTION2_BUFFER) {
+                bool doBabystep = false;
+                int16_t* babysteps = const_cast<int16_t*>(openBabysteps);
+                int32_t doSteps[NUM_AXES];
+                FOR_ALL_AXES(i) {
+                    if (*babysteps) { // babysteps needed
+                        doBabystep = true;
+                        if (*babysteps > 0) {
+                            doSteps[i] = RMath::min(babystepsPerSegment[i], *babysteps);
+                        } else {
+                            doSteps[i] = -RMath::min(babystepsPerSegment[i], -*babysteps);
+                        }
+                        // Com::printFLN(PSTR("BS:"), doSteps[i]);
+                        *babysteps -= doSteps[i];
+                    } else {
+                        doSteps[i] = 0;
+                    }
+                    babysteps++; // next pointer
+                }
+                if (doBabystep) { // create pseudo motion
+                    Motion1Buffer& buf = Motion1::reserve();
+                    buf.flags = FLAG_ACTIVE_SECONDARY;
+                    buf.action = Motion1Action::MOVE_BABYSTEPS;
+                    buf.state = Motion1State::BACKWARD_PLANNED;
+                    buf.maxJoinSpeed = 0;
+                    int32_t* start = reinterpret_cast<int32_t*>(buf.start);
+                    FOR_ALL_AXES(i) {
+                        start[i] = doSteps[i];
+                    }
+                }
+            } else {
+                return;
+            }
+        }
+        if (length == NUM_MOTION2_BUFFER) { // buffers full
             return;
         }
         act = &buffers[nextActId++];
@@ -64,13 +104,13 @@ void Motion2::timer() {
         actM1 = Motion1::forward(act);
         if (actM1 == nullptr) { // nothing to do, undo and return
             nextActId--;
-            //       DEBUG_MSG_FAST("fwfail ");
             return;
         }
         if (nextActId == NUM_MOTION2_BUFFER) {
             nextActId = 0;
         }
         act->motion1 = actM1;
+        Motion1::intLengthBuffered -= actM1->intLength;
         act->state = Motion2State::NOT_INITIALIZED;
         if (actM1->action == Motion1Action::MOVE && actM1->isCheckEndstops()) {
             // Compute number of steps required
@@ -85,7 +125,9 @@ void Motion2::timer() {
                 lp++;
             }
         }
+#ifdef DEBUG_REVERSAL
         lastL = 0;
+#endif
         // DEBUG_MSG2_FAST("new ", (int)actM1->action);
         InterruptProtectedBlock ip;
         length++;
@@ -95,42 +137,41 @@ void Motion2::timer() {
             act->nextState();
             lastMotorPos[lastMotorIdx][E_AXIS] = lroundf(actM1->start[E_AXIS] * Motion1::resolution[E_AXIS]);
         }
-        float sFactor = 1.0;
         if (act->state == Motion2State::ACCELERATE_INIT) {
             act->state = Motion2State::ACCELERATING;
-            if (velocityProfile->start(actM1->startSpeed, actM1->feedrate, act->t1)) {
+            if (velocityProfile->start(0, actM1->startSpeed, actM1->feedrate, act->t1)) {
                 act->nextState();
             }
             // DEBUG_MSG2_FAST("se:", VelocityProfile::segments);
-            sFactor = velocityProfile->s;
+            // sFactor = velocityProfile->s;
         } else if (act->state == Motion2State::ACCELERATING) {
             if (velocityProfile->next()) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s;
+            // sFactor = velocityProfile->s;
         } else if (act->state == Motion2State::PLATEAU_INIT) {
-            act->state = Motion2State::PLATEU;
-            if (velocityProfile->start(actM1->feedrate, actM1->feedrate, act->t2)) {
+            act->state = Motion2State::PLATEAU;
+            if (velocityProfile->start(act->s1, actM1->feedrate, actM1->feedrate, act->t2)) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s + act->s1;
-        } else if (act->state == Motion2State::PLATEU) {
+            // sFactor = velocityProfile->s + act->s1;
+        } else if (act->state == Motion2State::PLATEAU) {
             if (velocityProfile->next()) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s + act->s1;
+            // sFactor = velocityProfile->s + act->s1;
         } else if (act->state == Motion2State::DECCELERATE_INIT) {
             act->state = Motion2State::DECELERATING;
-            act->soff = act->s1 + act->s2;
-            if (velocityProfile->start(actM1->feedrate, actM1->endSpeed, act->t3)) {
+            // act->soff = act->s1 + act->s2;
+            if (velocityProfile->start(act->s1 + act->s2, actM1->feedrate, actM1->endSpeed, act->t3)) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s + act->soff;
+            // sFactor = velocityProfile->s + act->soff;
         } else if (act->state == Motion2State::DECELERATING) {
             if (velocityProfile->next()) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s + act->soff;
+            // sFactor = velocityProfile->s + act->soff;
         } else if (act->state == Motion2State::FINISHED) {
             // DEBUG_MSG("finished")
             m3->directions = 0;
@@ -141,6 +182,7 @@ void Motion2::timer() {
             Motion3::pushReserved();
             return;
         }
+        float sFactor = velocityProfile->s;
         m3->last = Motion3::skipParentId == act->id;
         if (act->state == Motion2State::FINISHED) {
             // prevent rounding errors
@@ -156,10 +198,18 @@ void Motion2::timer() {
         // Convert float position to integer motor position
         // This step catches all nonlinear behaviour from
         // acceleration profile and printer geometry
+#ifdef DEBUG_REVERSAL
         if (sFactor < lastL) {
-            Com::printFLN(PSTR("reversal:"), sFactor - lastL, 6);
+            if (sFactor < lastL - 0.0001) { // sometimes this happens with inprecision, so catch that case
+                Com::printF(PSTR("reversal:"), sFactor, 6);
+                Com::printF(Com::tColon, lastL, 6);
+                Com::printF(Com::tColon, act->s1, 6);
+                Com::printF(Com::tColon, act->s2, 6);
+                Com::printFLN(Com::tColon, act->s3, 6);
+            }
         }
         lastL = sFactor;
+#endif
         float pos[NUM_AXES];
         FOR_ALL_AXES(i) {
             if (actM1->axisUsed & axisBits[i]) {
@@ -172,7 +222,7 @@ void Motion2::timer() {
         fast8_t nextMotorIdx = 1 - lastMotorIdx;
         int32_t* np = lastMotorPos[nextMotorIdx];
         int32_t* lp = lastMotorPos[lastMotorIdx];
-        PrinterType::transform(pos, np);
+        PrinterType::transform(pos, np); // where we want to be in motor pos incl. bump corrections
         // Com::printFLN(PSTR("DS x="), np[0]); // TEST
         /* Com::printF(PSTR(" y="), np[1]);
         Com::printFLN(PSTR(" z="), np[2]);*/
@@ -181,7 +231,7 @@ void Motion2::timer() {
         m3->usedAxes = 0;
         if ((m3->stepsRemaining = velocityProfile->stepsPerSegment) == 0) {
             if (m3->last) { // extreme case, normally never happens
-                m3->usedAxes = 0;
+                // m3->usedAxes = 0;
                 m3->stepsRemaining = 1;
                 // Need to add this move to handle finished state correctly
                 Motion3::pushReserved();
@@ -190,11 +240,47 @@ void Motion2::timer() {
         }
         m3->errorUpdate = m3->stepsRemaining << 1;
         int* delta = m3->delta;
+        int16_t* babysteps = const_cast<int16_t*>(openBabysteps);
         uint8_t* bits = axisBits;
         FOR_ALL_AXES(i) {
-            if (i == E_AXIS && (advanceSteps != 0 || actM1->eAdv != 0)) {
+            *delta = *np - *lp;
+            if (*babysteps) { // babysteps needed
+                if (*delta > 0) {
+                    if (*babysteps > 0) {
+                        int16_t steps = RMath::min(babystepsPerSegment[i], *babysteps);
+                        if (*delta + steps > static_cast<int>(m3->stepsRemaining)) {
+                            steps = m3->stepsRemaining - *delta;
+                        }
+                        *babysteps -= steps;
+                        *delta += steps;
+                    } else {
+                        int16_t steps = RMath::min(babystepsPerSegment[i], -*babysteps);
+                        if (steps - *delta > static_cast<int>(m3->stepsRemaining)) {
+                            steps = m3->stepsRemaining + *delta;
+                        }
+                        *babysteps += steps;
+                        *delta -= steps;
+                    }
+                } else {
+                    if (*babysteps < 0) {
+                        int16_t steps = RMath::min(babystepsPerSegment[i], -*babysteps);
+                        if (steps - *delta > static_cast<int>(m3->stepsRemaining)) {
+                            steps = m3->stepsRemaining + *delta;
+                        }
+                        *babysteps += steps;
+                        *delta -= steps;
+                    } else {
+                        int16_t steps = RMath::min(babystepsPerSegment[i], *babysteps);
+                        if (*delta + steps > static_cast<int>(m3->stepsRemaining)) {
+                            steps = m3->stepsRemaining - *delta;
+                        }
+                        *babysteps -= steps;
+                        *delta += steps;
+                    }
+                }
+            }
+            if (i == E_AXIS && (advanceSteps != 0 || actM1->isAdvance())) {
                 // handle advance of E
-                *delta = *np - *lp;
                 int advTarget = velocityProfile->f * actM1->eAdv;
                 int advDiff = advTarget - advanceSteps;
                 /* Com::printF("adv:", advTarget);
@@ -205,29 +291,24 @@ void Motion2::timer() {
 
                 *delta += advDiff;
                 if (*delta > 0) { // extruding
-                    /* if (*delta < 0) { // prevent reversal, add later
-                        advDiff -= *delta;
-                        *delta = 0;
-                    } */
+                    if (*delta > static_cast<int>(m3->stepsRemaining)) {
+                        advTarget += m3->stepsRemaining - *delta;
+                        *delta = m3->stepsRemaining;
+                    }
                     *delta <<= 1;
                     m3->directions |= *bits;
                     m3->usedAxes |= *bits;
                 } else { // retracting, advDiff is always negative
-                    /* int half = *delta >> 1;
-                    if (half < 1) {
-                        half = 1;
+                    if (*delta < -static_cast<int>(m3->stepsRemaining)) {
+                        advTarget += m3->stepsRemaining + *delta;
+                        *delta = -m3->stepsRemaining;
                     }
-                    if (half < advDiff) { // last correction
-                        half = advDiff;
-                    }
-                    advDiff = half;
-                    *delta += half;*/
                     *delta = (-*delta) << 1;
                     m3->usedAxes |= *bits;
                 }
-                advanceSteps += advDiff;
+                advanceSteps = advTarget;
             } else {
-                if ((*delta = ((*np - *lp) << 1)) < 0) {
+                if ((*delta <<= 1) < 0) {
                     *delta = -*delta;
                     m3->usedAxes |= *bits;
                 } else if (*delta != 0) {
@@ -235,12 +316,41 @@ void Motion2::timer() {
                     m3->usedAxes |= *bits;
                 }
             }
+            if (*delta > m3->errorUpdate) { // test if more steps wanted then possible, should never happen!
+                                            // adjust *np by the number of steps we can not execute so physical step position does not get corrupted.
+                                            // That way next segment can correct remaining steps.
+#ifdef DEBUG_MOTION_ERRORS
+                Com::printF(PSTR("StepError"), (int)i);
+                Com::printF(PSTR(" d:"), *delta);
+                Com::printFLN(PSTR(" eu:"), m3->errorUpdate);
+#endif
+                if (m3->directions & *bits) { // positive move, reduce *np
+                    *np -= (*delta - m3->errorUpdate) >> 1;
+                } else {
+                    *np += (*delta - m3->errorUpdate) >> 1;
+                }
+                *delta = m3->errorUpdate;
+            }
             m3->error[i] = -m3->stepsRemaining;
             delta++;
             np++;
             lp++;
             bits++;
+            babysteps++;
         } // FOR_ALL_AXES
+        /* Com::printF(PSTR("sf:"), sFactor, 4);
+        Com::printF(PSTR(" s:"), (int)act->state);
+        Com::printF(PSTR(" da:"), m3->delta[A_AXIS]);
+        Com::printF(PSTR(" pa:"), pos[A_AXIS], 3);
+        // Com::printF(PSTR(" lpx:"), lastMotorPos[lastMotorIdx][0]);
+        Com::printF(PSTR(" lpa:"), lastMotorPos[lastMotorIdx][4]);
+        // Com::printF(PSTR(" lpy:"), lp[1]);
+        // Com::printF(PSTR(" lpz:"), lp[2]);
+        // Com::printF(PSTR(" npx:"), lastMotorPos[nextMotorIdx][0]);
+        Com::printFLN(PSTR(" npa:"), lastMotorPos[nextMotorIdx][4]);
+        // Com::printF(PSTR(" npy:"), np[1]);
+        // Com::printFLN(PSTR(" npz:"), np[2]);
+        */
         lastMotorIdx = nextMotorIdx;
         m3->parentId = act->id;
         m3->checkEndstops = actM1->isCheckEndstops();
@@ -259,42 +369,41 @@ void Motion2::timer() {
         if (act->state == Motion2State::NOT_INITIALIZED) {
             act->nextState();
         }
-        float sFactor = 1.0;
         if (act->state == Motion2State::ACCELERATE_INIT) {
             act->state = Motion2State::ACCELERATING;
-            if (velocityProfile->start(actM1->startSpeed, actM1->feedrate, act->t1)) {
+            if (velocityProfile->start(0, actM1->startSpeed, actM1->feedrate, act->t1)) {
                 act->nextState();
             }
             // DEBUG_MSG2_FAST("se:", VelocityProfile::segments);
-            sFactor = velocityProfile->s;
+            // sFactor = velocityProfile->s;
         } else if (act->state == Motion2State::ACCELERATING) {
             if (velocityProfile->next()) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s;
+            // sFactor = velocityProfile->s;
         } else if (act->state == Motion2State::PLATEAU_INIT) {
-            act->state = Motion2State::PLATEU;
-            if (velocityProfile->start(actM1->feedrate, actM1->feedrate, act->t2)) {
+            act->state = Motion2State::PLATEAU;
+            if (velocityProfile->startConstSpeed(act->s1, actM1->feedrate, act->t2)) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s + act->s1;
-        } else if (act->state == Motion2State::PLATEU) {
-            if (velocityProfile->next()) {
+            // sFactor = velocityProfile->s + act->s1;
+        } else if (act->state == Motion2State::PLATEAU) {
+            if (velocityProfile->nextConstSpeed()) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s + act->s1;
+            // sFactor = velocityProfile->s + act->s1;
         } else if (act->state == Motion2State::DECCELERATE_INIT) {
             act->state = Motion2State::DECELERATING;
-            act->soff = act->s1 + act->s2;
-            if (velocityProfile->start(actM1->feedrate, actM1->endSpeed, act->t3)) {
+            // act->soff = act->s1 + act->s2;
+            if (velocityProfile->start(act->s1 + act->s2, actM1->feedrate, actM1->endSpeed, act->t3)) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s + act->soff;
+            // sFactor = velocityProfile->s + act->soff;
         } else if (act->state == Motion2State::DECELERATING) {
             if (velocityProfile->next()) {
                 act->nextState();
             }
-            sFactor = velocityProfile->s + act->soff;
+            // sFactor = velocityProfile->s + act->soff;
         } else if (act->state == Motion2State::FINISHED) {
             m3->directions = 0;
             m3->usedAxes = 0;
@@ -303,6 +412,7 @@ void Motion2::timer() {
             Motion3::pushReserved();
             return;
         }
+        float sFactor = velocityProfile->s;
         m3->last = Motion3::skipParentId == act->id;
         if (act->state == Motion2State::FINISHED) {
             // prevent rounding errors
@@ -314,7 +424,6 @@ void Motion2::timer() {
                 m3->last = 1;
             }
         }
-        // Com::printFLN("sf:", sFactor, 4);
         // Convert float position to integer motor position
         // This step catches all nonlinear behaviour from
         // acceleration profile and printer geometry
@@ -325,6 +434,17 @@ void Motion2::timer() {
         FOR_ALL_AXES(i) {
             np[i] = lroundf(actM1->start[i] + sFactor * actM1->unitDir[i]);
         }
+        /* Com::printF(PSTR("sf:"), sFactor, 4);
+        Com::printF(PSTR(" s:"), (int)act->state);
+        Com::printF(PSTR(" lpx:"), lp[0]);
+        Com::printF(PSTR(" lpa:"), lp[4]);
+        // Com::printF(PSTR(" lpy:"), lp[1]);
+        // Com::printF(PSTR(" lpz:"), lp[2]);
+        Com::printF(PSTR(" npx:"), np[0]);
+        Com::printFLN(PSTR(" npa:"), np[4]);
+        // Com::printF(PSTR(" npy:"), np[1]);
+        // Com::printFLN(PSTR(" npz:"), np[2]);
+        */
         // Fill structures used to update bresenham
         m3->directions = 0;
         m3->usedAxes = 0;
@@ -346,6 +466,21 @@ void Motion2::timer() {
                 m3->directions |= axisBits[i];
                 m3->usedAxes |= axisBits[i];
             }
+            if (m3->delta[i] > m3->errorUpdate) { // test if more steps wanted then possible, should never happen!
+                                                  // adjust *np by the number of steps we can not execute so physical step position does not get corrupted.
+                                                  // That way next segment can correct remaining steps.
+#ifdef DEBUG_MOTION_ERRORS
+                Com::printF(PSTR("StepError_"), (int)i);
+                Com::printF(PSTR(":"), (int32_t)m3->stepsRemaining);
+                Com::printFLN(PSTR(","), m3->delta[i] >> 1);
+#endif
+                if (m3->directions & axisBits[i]) { // positive move, reduce *np
+                    np[i] -= (m3->delta[i] - m3->errorUpdate) >> 1;
+                } else {
+                    np[i] += (m3->delta[i] - m3->errorUpdate) >> 1;
+                }
+                m3->delta[i] = m3->errorUpdate;
+            }
             m3->error[i] = -(m3->stepsRemaining);
         }
         lastMotorIdx = nextMotorIdx;
@@ -355,6 +490,38 @@ void Motion2::timer() {
         if (tool) {
             Motion1Buffer* motion1 = act->motion1;
             m3->secondSpeed = tool->computeIntensity(velocityProfile->f, motion1->isActiveSecondary(), motion1->secondSpeed, motion1->secondSpeedPerMMPS);
+        } else {
+            m3->secondSpeed = 0;
+        }
+        PrinterType::enableMotors(m3->usedAxes);
+        if (m3->last) {
+            actM1 = nullptr; // select next on next interrupt
+        }
+    } else if (actM1->action == Motion1Action::MOVE_BABYSTEPS) {
+        int32_t* start = reinterpret_cast<int32_t*>(actM1->start);
+        m3->last = 1;
+        m3->parentId = act->id;
+        // Fill structures used to update bresenham
+        m3->directions = 0;
+        m3->usedAxes = 0;
+        m3->stepsRemaining = static_cast<int32_t>(static_cast<float>(STEPPER_FREQUENCY) / static_cast<float>(BLOCK_FREQUENCY));
+        m3->errorUpdate = (m3->stepsRemaining << 1);
+        FOR_ALL_AXES(i) {
+            m3->delta[i] = start[i] << 1;
+            if (m3->delta[i] < 0) {
+                m3->delta[i] = -m3->delta[i];
+                m3->usedAxes |= axisBits[i];
+            } else if (m3->delta[i] != 0) {
+                m3->directions |= axisBits[i];
+                m3->usedAxes |= axisBits[i];
+            }
+            m3->error[i] = -(m3->stepsRemaining);
+        }
+        m3->checkEndstops = Motion1::endstopMode != EndstopMode::DISABLED;
+        Tool* tool = Tool::getActiveTool();
+        if (tool) {
+            Motion1Buffer* motion1 = act->motion1;
+            m3->secondSpeed = tool->computeIntensity(0, motion1->isActiveSecondary(), motion1->secondSpeed, motion1->secondSpeedPerMMPS);
         } else {
             m3->secondSpeed = 0;
         }
@@ -392,21 +559,23 @@ void Motion2::timer() {
 // Also note the remainig z steps.
 
 void motorEndstopTriggered(fast8_t axis, bool dir) {
-    Motion1::motorTriggered |= axisBits[axis];
+    ufast8_t mask = axisBits[axis];
+    Motion1::motorTriggered |= mask;
     if (dir) {
-        Motion1::motorDirTriggered |= axisBits[axis];
+        Motion1::motorDirTriggered |= mask;
     } else {
-        Motion1::motorDirTriggered &= ~axisBits[axis];
+        Motion1::motorDirTriggered &= ~mask;
     }
 }
 void Motion2::motorEndstopTriggered(fast8_t axis, bool dir) {
-    Motion1::motorTriggered |= axisBits[axis];
+    ufast8_t mask = axisBits[axis];
+    Motion1::motorTriggered |= mask;
     if (dir) {
-        Motion1::motorDirTriggered |= axisBits[axis];
+        Motion1::motorDirTriggered |= mask;
     } else {
-        Motion1::motorDirTriggered &= ~axisBits[axis];
+        Motion1::motorDirTriggered &= ~mask;
     }
-    Com::printFLN(PSTR("MotorTrigger:"), (int)Motion1::motorTriggered); // TEST
+    // Com::printFLN(PSTR("MotorTrigger:"), (int)Motion1::motorTriggered); // TEST
     /*Motion1::setAxisHomed(axis, false);
     Motion2Buffer& m2 = Motion2::buffers[act->parentId];
     if (Motion1::endstopMode == EndstopMode::STOP_AT_ANY_HIT || Motion1::endstopMode == EndstopMode::PROBING) {
@@ -431,24 +600,39 @@ void endstopTriggered(fast8_t axis, bool dir) {
 }
 
 void Motion2::endstopTriggered(Motion3Buffer* act, fast8_t axis, bool dir) {
-    // DEBUG_MSG2_FAST("EH:", (int)axis);
     if (act == nullptr || act->checkEndstops == false) {
-        // DEBUG_MSG_FAST("EHX");
-        return;
+        if (act == nullptr && Motion3::length > 0) {
+#if SHORT_STEP_PULSES == 0
+            Motion3::unstepMotors();
+#endif
+            Motion3::activateNext();
+            act = Motion3::act;
+            if (act->checkEndstops == false) {
+                return;
+            }
+        } else {
+            return;
+        }
     }
-    fast8_t bit = axisBits[axis];
-    Motion1::axesTriggered = bit;
+    if (axis == ZPROBE_AXIS) {                              // z probe can trigger before real z min, so ignore during regular print
+        if (Motion1::endstopMode != EndstopMode::PROBING) { // ignore if not probing
+            return;
+        }
+        axis = Z_AXIS; // Handle like z axis!
+    }
+    ufast8_t bitMask = axisBits[axis];
+    Motion1::axesTriggered = bitMask;
     if (dir) {
-        Motion1::axesDirTriggered |= bit;
+        Motion1::axesDirTriggered |= bitMask;
     } else {
-        Motion1::axesDirTriggered &= ~bit;
+        Motion1::axesDirTriggered &= ~bitMask;
     }
     Motion2Buffer& m2 = Motion2::buffers[act->parentId];
     Motion1Buffer* m1 = m2.motion1;
-    if ((m1->axisUsed & bit) == 0) { // not motion directory
+    if ((m1->axisUsed & bitMask) == 0) { // not motion directory
         return;
     }
-    if ((m1->axisDir & bit) != (Motion1::axesDirTriggered & bit)) {
+    if ((m1->axisDir & bitMask) != (Motion1::axesDirTriggered & bitMask)) {
         return; // we move away so it is a stale signal from other direction
     }
     Motion1::setAxisHomed(axis, false);
@@ -466,7 +650,6 @@ void Motion2::endstopTriggered(Motion3Buffer* act, fast8_t axis, bool dir) {
             Motion3::skipParentId = act->parentId;
         }
     }
-    // DEBUG_MSG_FAST("EHF");
 }
 
 void Motion2Buffer::nextState() {
@@ -494,7 +677,7 @@ void Motion2Buffer::nextState() {
             return;
         }
     }
-    if (state == Motion2State::PLATEU) {
+    if (state == Motion2State::PLATEAU) {
         if (t3 > 0) {
             state = Motion2State::DECCELERATE_INIT;
             return;
